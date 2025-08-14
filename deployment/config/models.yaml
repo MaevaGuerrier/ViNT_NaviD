@@ -1,0 +1,10 @@
+nomad: 
+  config_path: "../../train/config/nomad.yaml"
+  ckpt_path: "../checkpoints/nomad.pth"
+
+navidiffusor: 
+  config_path: "../../train/config/nomad.yaml"
+  ckpt_path: "../checkpoints/navidiffusor.pth"
+
+
+# add your own model configs here after saving the *.pth file to ../model_weight
