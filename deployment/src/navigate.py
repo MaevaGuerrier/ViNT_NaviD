@@ -14,9 +14,10 @@ import tracemalloc
 import rospy
 from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import PoseStamped, Pose, Point
 from std_msgs.msg import Bool, Float32MultiArray
-from utils import msg_to_pil, to_numpy, transform_images, load_model, rotate_point_by_quaternion
+from nav_msgs.msg import Path
+from utils import msg_to_pil, to_numpy, transform_images, load_model, rotate_point_by_quaternion, pil_to_msg
 
 from vint_train.training.train_utils import get_action
 from vint_train.visualizing.action_utils import plot_trajs_and_points
@@ -38,6 +39,9 @@ from topic_names import (IMAGE_TOPIC,
 
 
 # CONSTANTS
+
+LOG_DIR_VIZ = "../logs_viz"
+
 TOPOMAP_IMAGES_DIR = "../topomaps/images"
 MODEL_WEIGHTS_PATH = "../model_weights"
 ROBOT_CONFIG_PATH ="../config/robot.yaml"
@@ -62,6 +66,14 @@ rela_pos = None
 # Load the model 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
+
+
+# TODO put in utils
+def check_dir_exists(dir_path: str = None):
+
+    dir_path = dir_path or LOG_DIR_VIZ
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
 
 def get_plt_param(uc_actions, gc_actions, goal_pos):
     traj_list = np.concatenate([
@@ -167,6 +179,16 @@ def pos_callback(msg):
     robo_orientation = np.array([msg.pose.orientation.x, msg.pose.orientation.y, 
                         msg.pose.orientation.z, msg.pose.orientation.w])
 
+# TODO put in utils
+def visualize_cost_map(cost_map, viz_points, ground_array):
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    ax.imshow(cost_map.cpu().numpy(), cmap='gray', vmin=0, vmax=1)
+    ax.scatter(viz_points[:, 0], viz_points[:, 1], c='red', s=1)
+    ax.scatter(ground_array[:, 0], ground_array[:, 1], c='blue', s=1)
+    check_dir_exists(LOG_DIR_VIZ)
+    plt.savefig(os.path.join(LOG_DIR_VIZ, "cost_map.png"))
+
+
 def main(args: argparse.Namespace):
     global context_size, robo_pos, robo_orientation, rela_pos
 
@@ -236,6 +258,14 @@ def main(args: argparse.Namespace):
     sampled_actions_pub = rospy.Publisher(SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1)
     goal_pub = rospy.Publisher("/topoplan/reached_goal", Bool, queue_size=1)
     marker_pub = rospy.Publisher(VISUAL_MARKER_TOPIC, Marker, queue_size=10)
+    waypoint_viz_pub = rospy.Publisher(
+        "viz_wp", PoseStamped, queue_size=1)
+    path_viz_pub = rospy.Publisher(
+        "viz_path", Path, queue_size=1)
+    goal_img_pub = rospy.Publisher("/topoplan/goal_img", Image, queue_size=1)
+    subgoal_img_pub = rospy.Publisher("/topoplan/subgoal_img", Image, queue_size=1)
+    closest_node_img_pub = rospy.Publisher("/topoplan/closest_node_img", Image, queue_size=1)
+
 
     print("Registered with master node. Waiting for image observations...")
 
@@ -258,6 +288,11 @@ def main(args: argparse.Namespace):
                 obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False)
                 if args.guide:
                     pathguide.get_cost_map_via_tsdf(context_queue[-1])
+                    # Retrieving costmap for visualization
+                    if args.visualize:
+                        cost_map, viz_points, ground_array = pathguide.get_cost_map()
+                        visualize_cost_map(cost_map, viz_points, ground_array)
+
                 obs_images = torch.split(obs_images, 3, dim=1)
                 obs_images = torch.cat(obs_images, dim=1) 
                 obs_images = obs_images.to(device)
@@ -363,7 +398,30 @@ def main(args: argparse.Namespace):
                     goal_data = transform_images(sg_img, model_params["image_size"])
                     batch_obs_imgs.append(transf_obs_img)
                     batch_goal_data.append(goal_data)
-                    
+
+                goal_img = transform_images(topomap[goal_node], model_params["image_size"], center_crop=crop, return_img=True)
+                goal_img_msg = pil_to_msg(goal_img)
+                goal_img_msg.header.stamp = rospy.Time.now()
+                goal_img_msg.header.frame_id = "base_footprint"
+                goal_img_msg.encoding = "rgb8"
+                goal_img_pub.publish(goal_img_msg)
+
+                subgoal_img = transform_images(topomap[end], model_params["image_size"], center_crop=crop, return_img=True)
+                subgoal_img_msg = pil_to_msg(subgoal_img)
+                subgoal_img_msg.header.stamp = rospy.Time.now()
+                subgoal_img_msg.header.frame_id = "base_footprint"
+                subgoal_img_msg.encoding = "rgb8"
+                subgoal_img_pub.publish(subgoal_img_msg)
+
+
+                closest_node_img = transform_images(topomap[closest_node], model_params["image_size"], center_crop=crop, return_img=True)
+                closest_node_img_msg = pil_to_msg(closest_node_img)
+                closest_node_img_msg.header.stamp = rospy.Time.now()
+                closest_node_img_msg.header.frame_id = "base_footprint"
+                closest_node_img_msg.encoding = "rgb8"
+                closest_node_img_pub.publish(closest_node_img_msg)
+
+
                 # predict distances and waypoints
                 batch_obs_imgs = torch.cat(batch_obs_imgs, dim=0).to(device)
                 batch_goal_data = torch.cat(batch_goal_data, dim=0).to(device)
@@ -372,11 +430,16 @@ def main(args: argparse.Namespace):
                 distances = to_numpy(distances)
                 waypoints = to_numpy(waypoints)
                 # look for closest node
+                # TODO understand here first if condition is NaViD
+                # Note that closest_node = min_dist_idx in orginal codebase
                 if args.pos_goal:
                     goal_poses = np.array([[float(lines[i].split()[0]), float(lines[i].split()[1]), float(lines[i].split()[2])] for i in range(start, end + 1)])
                     closest_node = np.argmin(np.linalg.norm(goal_poses - robo_pos, axis=1))
-                else:
+                    print("closest node:", closest_node)
+                else: # Original Nomad condition to chose closest_node
                     closest_node = np.argmin(distances)
+                    print("Original Nomad condition closest node:", closest_node)
+
                 # chose subgoal and output waypoints
                 if distances[closest_node] > args.close_threshold:
                     chosen_waypoint = waypoints[closest_node][args.waypoint]
@@ -386,12 +449,39 @@ def main(args: argparse.Namespace):
                         closest_node + 1, len(waypoints) - 1)][args.waypoint]
                     sg_img = topomap[start + min(closest_node + 1, len(waypoints) - 1)]     
 
+
+                               # Publish visualization messages
+                # Waypoint
+                waypoint_msg_viz = PoseStamped()
+                waypoint_msg_viz.header.frame_id = "odom"
+                waypoint_msg_viz.header.stamp = rospy.Time.now()
+                wp_point = Point(x=chosen_waypoint[0], y=chosen_waypoint[1])
+                # print("waypoint point:", wp_point)
+                wp_position = Pose(position=wp_point)
+                # print("waypoint position:", wp_position)
+                waypoint_msg_viz.pose = wp_position           
+                waypoint_viz_pub.publish(waypoint_msg_viz)
+
+                # Path
+                path_msg_viz = Path()
+                path_msg_viz.header.frame_id = "base_footprint"
+                path_msg_viz.header.stamp = rospy.Time.now()
+                for wp in waypoints[closest_node]:
+                    # print("waypoint:", wp)
+                    path_msg_viz.poses.append(PoseStamped(
+                        pose=Pose(position=Point(x=wp[0], y=wp[1]))))
+                path_viz_pub.publish(path_msg_viz)                
+                print("------")
+
         if model_params["normalize"]:
             chosen_waypoint[:2] *= (scale_factor / scale)
 
         waypoint_msg = Float32MultiArray()
         waypoint_msg.data = chosen_waypoint
         waypoint_pub.publish(waypoint_msg)
+
+        # TODO understand where they defined reach goal
+        # In original codebase it was here
 
         torch.cuda.empty_cache()
 
@@ -470,6 +560,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--point-goal",
         default=False,
+        type=bool,
+    )
+    parser.add_argument(
+        "--visualize",
+        default=True,
         type=bool,
     )
     args = parser.parse_args()
