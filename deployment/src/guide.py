@@ -164,10 +164,19 @@ class PathGuide:
 
         self.tsdf_cost_map.LoadPointCloud(pseudo_pcd)
         data, coord = self.tsdf_cost_map.CreateTSDFMap()
+        # data contains [tsdf_array, viz_points, ground_array]
         if data is None:
             self.cost_map = None
         else:
             self.cost_map = torch.tensor(data[0]).requires_grad_(False).to(self.device)
+            self.viz_points = data[1]
+            self.ground_array = data[2]
+
+    def get_cost_map(self, extra_info: bool = True):
+        if extra_info:
+            return self.cost_map, self.viz_points, self.ground_array
+        return self.cost_map
+
 
     def collision_cost(self, trajs, scale_factor=None):
         if self.cost_map is None:
