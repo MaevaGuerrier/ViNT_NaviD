@@ -92,10 +92,11 @@ def action_plot(uc_actions, gc_actions, goal_pos):
         point_alphas=point_alphas, 
     )
 
-    save_path = os.path.join(f"output_goal_{rela_pos}.png")
-    plt.savefig(save_path)
-    plt.close(fig)
-    print(f"output image saved as {save_path}")
+    # print(rela_pos)
+    # save_path = os.path.join(f"output_goal_{rela_pos}.png")
+    # plt.savefig(save_path)
+    # plt.close(fig)
+    # print(f"output image saved as {save_path}")
 
 def Marker_process(points, id, selected_num, length=8):
     marker = Marker()
@@ -442,7 +443,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--close-threshold",
         "-t",
-        default=3,
+        default=0.5,
         type=int,
         help="""temporal distance within the next node in the topomap before 
         localizing to it (default: 3)""",
@@ -450,7 +451,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--radius",
         "-r",
-        default=4,
+        default=2,
         type=int,
         help="""temporal number of locobal nodes to look at in the topopmap for
         localization (default: 2)""",
@@ -472,6 +473,13 @@ if __name__ == "__main__":
         default=False,
         type=bool,
     )
+
+    parser.add_argument(
+        "--pos_goal",
+        default=False,
+        type=bool,
+    )
+
     args = parser.parse_args()
     print(f"Using {device}")
     main(args)

@@ -1,6 +1,6 @@
 nomad: 
   config_path: "../../train/config/nomad.yaml"
-  ckpt_path: "../checkpoints/nomad.pth"
+  ckpt_path: "../model_weights/nomad.pth"
 
 navidiffusor: 
   config_path: "../../train/config/nomad.yaml"

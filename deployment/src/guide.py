@@ -41,16 +41,24 @@ class PathGuide:
         self.delta_min = from_numpy(ACTION_STATS['min']).to(self.device)
         self.delta_max = from_numpy(ACTION_STATS['max']).to(self.device)
         
+        # camera_intrinsics 
         # TODO: Pass in parameters instead of constants
-        self.camera_intrinsics = np.array([[607.99658203125, 0, 642.2532958984375],
-                        [0, 607.862060546875, 366.3480224609375],
-                        [0, 0, 1]])
+        # self.camera_intrinsics = np.array([[607.99658203125, 0, 642.2532958984375],
+        #                 [0, 607.862060546875, 366.3480224609375],
+        #                 [0, 0, 1]])
+        self.camera_intrinsics = np.array([ [262.4592858300215, 1.9161601094375007, 327.6999606754441],
+                                            [0.0, 263.41990773924925, 224.45937199538153],
+                                            [0.0, 0.0, 1.0]])
         # robot to camera extrinsic
-        self.camera_extrinsics = np.array([[0, 0, 1, -0.000],
-                                    [-1, 0, 0, -0.000],
-                                    [0, -1, 0, -0.042],
+        # self.camera_extrinsics = np.array([[0, 0, 1, -0.000],
+        #                             [-1, 0, 0, -0.000],
+        #                             [0, -1, 0, -0.042],
+        #                             [0, 0, 0, 1]])
+        # 2.5 cm is distance of camera from robot base
+        self.camera_extrinsics = np.array([[0, 0, 1, 0.000],
+                                    [-1, 0, 0, 0.000],
+                                    [0, -1, 0, 0.025],
                                     [0, 0, 0, 1]])
-
         # depth anything v2 init
         model_configs = {
             'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -60,12 +68,12 @@ class PathGuide:
         }
         encoder = 'vits' # or 'vits', 'vitb', 'vitg'
         self.model = DepthAnythingV2(**model_configs[encoder])
-        package_name = 'depth_anything_v2'
-        package_spec = importlib.util.find_spec(package_name)
-        if package_spec is None:
-            raise ImportError(f"Package '{package_name}' not found")
-        package_path = os.path.dirname(package_spec.origin)
-        self.model.load_state_dict(torch.load(os.path.join(package_path, f'../checkpoints/depth_anything_v2_{encoder}.pth'), map_location='cpu'))
+        # package_name = 'depth_anything_v2'
+        # package_spec = importlib.util.find_spec(package_name)
+        # if package_spec is None:
+        #     raise ImportError(f"Package '{package_name}' not found")
+        # package_path = os.path.dirname(package_spec.origin)
+        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth'))
         self.model = self.model.to(self.device).eval()
 
         # TSDF init
