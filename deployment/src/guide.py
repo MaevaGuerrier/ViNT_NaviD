@@ -17,6 +17,7 @@ from costmap_cfg import CostMapConfig
 
 from PIL import Image as PILImage
 
+import time
 
 # CONSTANT 
 LOG_DIR_VIZ = "../logs_viz"
@@ -103,14 +104,14 @@ class PathGuide:
             'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
             'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
         }
-        encoder = 'vitb' # or 'vits', 'vitb', 'vitg'
+        encoder = 'vits' # or 'vits', 'vitb', 'vitg'
         self.model = DepthAnythingV2(**model_configs[encoder])
         # package_name = 'depth_anything_v2'
         # package_spec = importlib.util.find_spec(package_name)
         # if package_spec is None:
         #     raise ImportError(f"Package '{package_name}' not found")
         # package_path = os.path.dirname(package_spec.origin)
-        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_vitb.pth'))
+        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth'))
         self.model = self.model.to(self.device).eval()
 
         # TSDF init
@@ -147,7 +148,7 @@ class PathGuide:
         
         return squared_scale.to(self.device)
 
-    def depth_to_pcd(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+    def depth_to_pcd_orig_method(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
         height, width = depth_image.shape
         print("height: ", height, "width: ", width)
         fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
@@ -175,6 +176,78 @@ class PathGuide:
         
         return point_cloud
 
+    def depth_to_pcd_non_inverse_depth(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+        height, width = depth_image.shape
+        print("height: ", height, "width: ", width)
+        fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
+        cx, cy = camera_intrinsics[0, 2] * resize_factor, camera_intrinsics[1, 2] * resize_factor
+        
+        x, y = np.meshgrid(np.arange(width), np.arange(height))
+        z = depth_image.astype(np.float32)
+        z_safe = np.where(z == 0, np.nan, z)  # keep invalid pixels NaN
+
+        x = (x - cx) * z_safe / fx
+        y = (y - cy) * z_safe / fy
+
+        non_ground_mask = (z > 0.5) & (z < max_distance)
+        x_non_ground = x[non_ground_mask]
+        y_non_ground = y[non_ground_mask]
+        z_non_ground = z[non_ground_mask]
+
+        points = np.stack((x_non_ground, y_non_ground, z_non_ground), axis=-1).reshape(-1, 3)
+        
+        extrinsics = camera_extrinsics
+        homogeneous_points = np.hstack((points, np.ones((points.shape[0], 1))))
+        transformed_points = (extrinsics @ homogeneous_points.T).T[:, :3]
+        import time
+        start_time = time.time()
+        point_cloud = o3d.geometry.PointCloud()
+        point_cloud.points = o3d.utility.Vector3dVector(transformed_points)
+        end_time = time.time()
+        print("point cloud generation time: ", end_time - start_time)
+        
+        return point_cloud
+
+    def depth_to_pcd(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+
+        start_time = time.time()
+
+        height, width = depth_image.shape
+        fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
+        cx, cy = camera_intrinsics[0, 2] * resize_factor, camera_intrinsics[1, 2] * resize_factor
+
+        # Convert depth to Open3D Image
+        depth_o3d = o3d.geometry.Image(depth_image.astype(np.float32))
+
+        # Intrinsics in Open3D format
+        intrinsic = o3d.camera.PinholeCameraIntrinsic(
+            width, height, fx, fy, cx, cy
+        )
+
+        # Ensure extrinsics is homogeneous 4x4
+        extrinsics = camera_extrinsics.astype(np.float64)
+
+        # Generate point cloud (C++ optimized)
+        pcd = o3d.geometry.PointCloud.create_from_depth_image(
+            depth_o3d,
+            intrinsic,
+            np.linalg.inv(extrinsics),   # Open3D expects camera pose, so invert extrinsics
+            depth_scale=1.0,             # adjust if depth is not in meters
+            depth_trunc=max_distance,
+            stride=1                     # >1 will downsample for even faster speed
+        )
+
+        # Optional: filter out ground
+        points = np.asarray(pcd.points)
+        mask = points[:, 2] > height_threshold
+        pcd = pcd.select_by_index(np.where(mask)[0])
+
+        end_time = time.time()
+        print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
+            f"({len(pcd.points)} points)")
+
+        return pcd
+
     def add_robot_dim(self, world_ps):
         tangent = world_ps[:, 1:, 0:2] - world_ps[:, :-1, 0:2]
         tangent = tangent / torch.norm(tangent, dim=2, keepdim=True)
@@ -199,14 +272,14 @@ class PathGuide:
         img = img.resize(new_size)
 
         depth_image = self.model.infer_image(cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR))
-        print("Depth image generated")
-        # save depth image  TODO visualize depth image
-        vis_depth(img, depth_image)
+        # print("Depth image generated")
+        # TODO uncomment to visualize
+        # vis_depth(img, depth_image)
 
         pseudo_pcd = self.depth_to_pcd(depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
         # open3d save pointcloud
         o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), pseudo_pcd)
-        # exit()
+
         self.tsdf_cost_map.LoadPointCloud(pseudo_pcd)
         data, coord = self.tsdf_cost_map.CreateTSDFMap()
 
