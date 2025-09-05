@@ -7,11 +7,12 @@
 import argparse
 import os
 from typing import Optional, Union
-
+import types
 import numpy as np
 import open3d as o3d
-import pypose as pp
+# import pypose as pp
 import torch
+import dataclasses
 import yaml
 
 # viplanner
@@ -96,17 +97,18 @@ class CostMapPCD:
             o3d.visualization.draw_geometries([self.pcd_viz])
         return
 
-    def Pos2Ind(self, points: Union[torch.Tensor, pp.LieTensor]):
+    # def Pos2Ind(self, points: Union[torch.Tensor, pp.LieTensor]):
+    def Pos2Ind(self, points: torch.Tensor):
         # points [torch shapes [num_p, 3]]
         start_xy = torch.tensor(
             [self.cfg.x_start, self.cfg.y_start],
             dtype=torch.float64,
             device=points.device,
         ).expand(1, 1, -1)
-        if isinstance(points, pp.LieTensor):
-            H = (points.tensor()[:, :, 0:2] - start_xy) / self.cfg.general.resolution
-        else:
-            H = (points[:, :, 0:2] - start_xy) / self.cfg.general.resolution
+        # if isinstance(points, pp.LieTensor):
+        #     H = (points.tensor()[:, :, 0:2] - start_xy) / self.cfg.general.resolution
+        # else:
+        H = (points[:, :, 0:2] - start_xy) / self.cfg.general.resolution
         mask = torch.logical_and(
             (H > 0).all(axis=2),
             (H < torch.tensor([self.num_x, self.num_y], device=points.device)[None, None, :]).all(axis=2),
@@ -172,6 +174,7 @@ class CostMapPCD:
         np.savetxt(map_path, self.tsdf_array.cpu())
         np.savetxt(ground_path, self.ground_array.cpu())
         np.savetxt(cloud_path, self.viz_points)
+        print(self.cfg)
         # save config parameters
         yaml_path = os.path.join(
             self.cfg.general.root_path,
@@ -181,7 +184,7 @@ class CostMapPCD:
         )
         with open(yaml_path, "w+") as file:
             yaml.dump(
-                vars(self.cfg),
+                dataclasses.asdict(self.cfg),
                 file,
                 allow_unicode=True,
                 default_flow_style=False,
@@ -215,6 +218,8 @@ class CostMapPCD:
         )
 
 
+
+
 if __name__ == "__main__":
     # parse environment directory and cost_map name
     parser = argparse.ArgumentParser(prog="Show Costmap", description="Show Costmap")
@@ -228,8 +233,9 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--map", type=str, help="name of the cost_map", required=True)
     args = parser.parse_args()
 
+
+
+# EoF
     # show costmap
     map = CostMapPCD.ReadTSDFMap(args.env, args.map)
     map.ShowTSDFMap()
-
-# EoF

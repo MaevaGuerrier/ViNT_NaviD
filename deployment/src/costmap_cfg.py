@@ -6,7 +6,7 @@
 
 # python
 import os
-# from dataclasses import dataclass
+from dataclasses import dataclass
 from typing import Optional
 
 import yaml
@@ -56,7 +56,7 @@ Loader.add_constructor(
 )
 
 
-# @dataclass
+@dataclass
 class ReconstructionCfg:
     """
     Arguments for 3D reconstruction using depth maps
@@ -94,7 +94,7 @@ class ReconstructionCfg:
         return os.path.join(self.out_dir, self.env)
 
 
-# @dataclass
+@dataclass
 class SemCostMapConfig:
     """Configuration for the semantic cost map"""
 
@@ -125,7 +125,7 @@ class SemCostMapConfig:
     compute_height_map: bool = False  # false for matterport, true for carla and nomoko
 
 
-# @dataclass
+@dataclass
 class TsdfCostMapConfig:
     """Configuration for the tsdf cost map"""
 
@@ -144,7 +144,7 @@ class TsdfCostMapConfig:
     free_space_threshold: float = 0.8
 
 
-# @dataclass
+@dataclass
 class GeneralCostMapConfig:
     """General Cost Map Configuration"""
 
@@ -152,23 +152,23 @@ class GeneralCostMapConfig:
     root_path: str = "town01"
     ply_file: str = "cloud.ply"
     # resolution of the cost map
-    resolution: float = 0.04  # [m]  (0.04 for matterport, 0.1 for carla)
+    resolution: float = 0.01  # [m]  (0.04 for matterport, 0.1 for carla)
     # map parameters
     clear_dist: float = 1.0  # cost map expansion over the point cloud space (prevent paths to go out of the map)
     # smoothing parameters
     sigma_smooth: float = 3.0
     # cost map expansion
-    x_min: Optional[float] = 0
+    x_min: Optional[float] = None
     # [m] if None, the minimum of the point cloud is used None (carla town01:  -8.05   matterport: None)
-    y_min: Optional[float] = -3
+    y_min: Optional[float] = None
     # [m] if None, the minimum of the point cloud is used None (carla town01:  -8.05   matterport: None)
-    x_max: Optional[float] = 8
+    x_max: Optional[float] = None
     # [m] if None, the maximum of the point cloud is used None (carla town01:  346.22  matterport: None)
-    y_max: Optional[float] = 3
+    y_max: Optional[float] = None
     # [m] if None, the maximum of the point cloud is used None (carla town01:  336.65  matterport: None)
 
 
-# @dataclass
+@dataclass
 class CostMapConfig:
     """General Cost Map Configuration"""
 

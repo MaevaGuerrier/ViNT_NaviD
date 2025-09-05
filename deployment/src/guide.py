@@ -8,12 +8,18 @@ import cv2
 import matplotlib.pyplot as plt
 from depth_anything_v2.dpt import DepthAnythingV2
 
+import rospy
 import importlib.util
 import os
 import open3d as o3d
 from tsdf_cost_map import TsdfCostMap
 from costmap_cfg import CostMapConfig
 
+from PIL import Image as PILImage
+
+
+# CONSTANT 
+LOG_DIR_VIZ = "../logs_viz"
 
 def from_numpy(array: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(array).float()
@@ -23,6 +29,19 @@ def check_tensor(tensor, name="tensor"):
         print(f"{name} grad: {tensor.grad}")
     else:
         print(f"{name} grad is None")
+
+def vis_depth(image, depth):
+
+        depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
+        depth = depth.astype(np.uint8)
+        depth = np.repeat(depth[..., np.newaxis], 3, axis=-1)
+        # convert image from pil to opencv2
+        image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+        split_region = np.ones((image.shape[0], 50, 3), dtype=np.uint8) * 255
+        combined_result = cv2.hconcat([image, split_region, depth])
+        
+        cv2.imwrite(os.path.join(LOG_DIR_VIZ, f'depth_image.png'), combined_result)
 
 class PathGuide:
 
@@ -46,19 +65,37 @@ class PathGuide:
         # self.camera_intrinsics = np.array([[607.99658203125, 0, 642.2532958984375],
         #                 [0, 607.862060546875, 366.3480224609375],
         #                 [0, 0, 1]])
-        self.camera_intrinsics = np.array([ [262.4592858300215, 1.9161601094375007, 327.6999606754441],
-                                            [0.0, 263.41990773924925, 224.45937199538153],
+        # FISHEYE 
+        # self.camera_intrinsics = np.array([ [262.4592858300215, 1.9161601094375007, 327.6999606754441],
+        #                                     [0.0, 263.41990773924925, 224.45937199538153],
+        #                                     [0.0, 0.0, 1.0]])
+        # D435 CAM
+        # self.camera_intrinsics = np.array([[381.44378662109375, 0.0, 318.47174072265625],
+        #                                     [0.0, 381.1520080566406, 250.35641479492188],
+        #                                     [0.0, 0.0, 1.0]])
+        # OAK lite pro
+        self.camera_intrinsics = np.array([[1017.5782470703125, 0.0, 612.1245727539062],
+                                            [0.0, 1017.5782470703125, 388.58673095703125],
                                             [0.0, 0.0, 1.0]])
+
+
         # robot to camera extrinsic
         # self.camera_extrinsics = np.array([[0, 0, 1, -0.000],
         #                             [-1, 0, 0, -0.000],
         #                             [0, -1, 0, -0.042],
         #                             [0, 0, 0, 1]])
+        # FISHEYE
         # 2.5 cm is distance of camera from robot base
+        # self.camera_extrinsics = np.array([[0, 0, 1, 0.000],
+        #                             [-1, 0, 0, 0.000],
+        #                             [0, -1, 0, 0.025],
+        #                             [0, 0, 0, 1]])
+        # oak lite APPROX TODO again
         self.camera_extrinsics = np.array([[0, 0, 1, 0.000],
                                     [-1, 0, 0, 0.000],
-                                    [0, -1, 0, 0.025],
+                                    [0, -1, 0, 0.011],
                                     [0, 0, 0, 1]])
+
         # depth anything v2 init
         model_configs = {
             'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -66,14 +103,14 @@ class PathGuide:
             'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
             'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
         }
-        encoder = 'vits' # or 'vits', 'vitb', 'vitg'
+        encoder = 'vitb' # or 'vits', 'vitb', 'vitg'
         self.model = DepthAnythingV2(**model_configs[encoder])
         # package_name = 'depth_anything_v2'
         # package_spec = importlib.util.find_spec(package_name)
         # if package_spec is None:
         #     raise ImportError(f"Package '{package_name}' not found")
         # package_path = os.path.dirname(package_spec.origin)
-        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth'))
+        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_vitb.pth'))
         self.model = self.model.to(self.device).eval()
 
         # TSDF init
@@ -156,14 +193,23 @@ class PathGuide:
 
     def get_cost_map_via_tsdf(self, img):
         original_width, original_height = img.size
-        resize_factor = 0.25
+        resize_factor = 1 # original value was 1
         new_size = (int(original_width * resize_factor), int(original_height * resize_factor))
+        # import pdb; pdb.set_trace()
         img = img.resize(new_size)
-        depth_image = self.model.infer_image(cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR))
-        pseudo_pcd = self.depth_to_pcd(depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
 
+        depth_image = self.model.infer_image(cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR))
+        print("Depth image generated")
+        # save depth image  TODO visualize depth image
+        vis_depth(img, depth_image)
+
+        pseudo_pcd = self.depth_to_pcd(depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
+        # open3d save pointcloud
+        o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), pseudo_pcd)
+        # exit()
         self.tsdf_cost_map.LoadPointCloud(pseudo_pcd)
         data, coord = self.tsdf_cost_map.CreateTSDFMap()
+
         # data contains [tsdf_array, viz_points, ground_array]
         if data is None:
             self.cost_map = None

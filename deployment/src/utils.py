@@ -30,6 +30,42 @@ from vint_train.models.nomad.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 # from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
 
+def pil_to_numpy_array(image_input, target_size: tuple = (224, 224)) -> np.ndarray:
+    """Convert PIL image or numpy array to numpy array with proper formatting for Crossformer."""
+
+    if isinstance(image_input, PILImage.Image):
+
+        if image_input.size != target_size:
+            image_input = image_input.resize(target_size)
+        img_array = np.array(image_input)
+    elif isinstance(image_input, np.ndarray):
+
+        img_array = image_input.copy()
+
+        if img_array.shape[:2] != target_size:
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                pil_temp = PILImage.fromarray(img_array.astype(np.uint8))
+            elif len(img_array.shape) == 2:
+                pil_temp = PILImage.fromarray(img_array.astype(np.uint8), mode='L')
+            else:
+                pil_temp = PILImage.fromarray(img_array.astype(np.uint8))
+
+            pil_temp = pil_temp.resize(target_size)
+            img_array = np.array(pil_temp)
+    else:
+        raise ValueError(f"Unsupported input type: {type(image_input)}")
+
+    if len(img_array.shape) == 2:
+        img_array = np.stack([img_array] * 3, axis=-1)
+    elif img_array.shape[-1] == 4:
+        img_array = img_array[:, :, :3]
+
+    if img_array.dtype != np.uint8:
+        img_array = img_array.astype(np.uint8)
+
+    return img_array
+
+
 
 def load_model(
     model_path: str,
