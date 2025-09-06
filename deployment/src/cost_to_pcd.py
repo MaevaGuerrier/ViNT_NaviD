@@ -174,7 +174,7 @@ class CostMapPCD:
         np.savetxt(map_path, self.tsdf_array.cpu())
         np.savetxt(ground_path, self.ground_array.cpu())
         np.savetxt(cloud_path, self.viz_points)
-        print(self.cfg)
+        # print(self.cfg)
         # save config parameters
         yaml_path = os.path.join(
             self.cfg.general.root_path,

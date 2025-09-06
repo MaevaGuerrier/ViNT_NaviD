@@ -28,7 +28,7 @@ from vint_train.models.nomad.nomad import DenseNetwork
 from vint_train.models.nomad.nomad import NoMaD
 from vint_train.models.nomad.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
-# from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
+from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
 
 def pil_to_numpy_array(image_input, target_size: tuple = (224, 224)) -> np.ndarray:
     """Convert PIL image or numpy array to numpy array with proper formatting for Crossformer."""
@@ -160,18 +160,55 @@ def msg_to_pil(msg: Image) -> PILImage.Image:
 
 def pil_to_msg(pil_img: PILImage.Image, encoding="mono8") -> Image:
     img = np.asarray(pil_img)  
+    if img.ndim > 3:  
+        img = img[0] # removing batch size
     ros_image = Image(encoding=encoding)
     ros_image.height, ros_image.width, _ = img.shape
     ros_image.data = img.ravel().tobytes() 
     ros_image.step = ros_image.width
     return ros_image
+    
+def pil_to_numpy_array(image_input, target_size: tuple = (224, 224)) -> np.ndarray:
+    """Convert PIL image or numpy array to numpy array with proper formatting for Crossformer."""
 
+    if isinstance(image_input, PILImage.Image):
+
+        if image_input.size != target_size:
+            image_input = image_input.resize(target_size)
+        img_array = np.array(image_input)
+    elif isinstance(image_input, np.ndarray):
+
+        img_array = image_input.copy()
+
+        if img_array.shape[:2] != target_size:
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                pil_temp = PILImage.fromarray(img_array.astype(np.uint8))
+            elif len(img_array.shape) == 2:
+                pil_temp = PILImage.fromarray(img_array.astype(np.uint8), mode='L')
+            else:
+                pil_temp = PILImage.fromarray(img_array.astype(np.uint8))
+
+            pil_temp = pil_temp.resize(target_size)
+            img_array = np.array(pil_temp)
+    else:
+        raise ValueError(f"Unsupported input type: {type(image_input)}")
+
+    if len(img_array.shape) == 2:
+        img_array = np.stack([img_array] * 3, axis=-1)
+    elif img_array.shape[-1] == 4:
+        img_array = img_array[:, :, :3]
+
+    if img_array.dtype != np.uint8:
+        img_array = img_array.astype(np.uint8)
+
+    return img_array
 
 def to_numpy(tensor):
     return tensor.cpu().detach().numpy()
 
 
 def transform_images(pil_imgs: List[PILImage.Image], image_size: List[int], center_crop: bool = False) -> torch.Tensor:
+    """Transforms a list of PIL image to a torch tensor."""
     transform_type = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -183,13 +220,24 @@ def transform_images(pil_imgs: List[PILImage.Image], image_size: List[int], cent
         pil_imgs = [pil_imgs]
     transf_imgs = []
     for pil_img in pil_imgs:
+        if not isinstance(pil_img, PILImage.Image):
+            pil_img = PILImage.fromarray(pil_img.astype(np.uint8))
+        tensor_img = transforms.ToTensor()(pil_img)
+
+        # Add fake channel if only 2 channels
+        if tensor_img.shape[0] == 2:
+            print("Adding fake third channel")
+            fake_channel = torch.zeros_like(tensor_img[0:1])
+            tensor_img = torch.cat([tensor_img, fake_channel], dim=0)
+
+        pil_img = transforms.ToPILImage()(tensor_img)
         w, h = pil_img.size
         if center_crop:
             if w > h:
                 pil_img = TF.center_crop(pil_img, (h, int(h * IMAGE_ASPECT_RATIO)))
             else:
                 pil_img = TF.center_crop(pil_img, (int(w / IMAGE_ASPECT_RATIO), w))
-        pil_img = pil_img.resize(image_size) 
+        pil_img = pil_img.resize(image_size)
         transf_img = transform_type(pil_img)
         transf_img = torch.unsqueeze(transf_img, 0)
         transf_imgs.append(transf_img)

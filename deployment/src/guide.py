@@ -148,7 +148,8 @@ class PathGuide:
         
         return squared_scale.to(self.device)
 
-    def depth_to_pcd_orig_method(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+    def depth_to_pcd_inverse_depth(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+        start_time = time.time()
         height, width = depth_image.shape
         print("height: ", height, "width: ", width)
         fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
@@ -173,7 +174,11 @@ class PathGuide:
         
         point_cloud = o3d.geometry.PointCloud()
         point_cloud.points = o3d.utility.Vector3dVector(transformed_points)
-        
+
+        end_time = time.time()
+        print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
+            f"({len(point_cloud.points)} points)")
+
         return point_cloud
 
     def depth_to_pcd_non_inverse_depth(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
@@ -208,7 +213,7 @@ class PathGuide:
         
         return point_cloud
 
-    def depth_to_pcd(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+    def depth_to_pcd(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=30.0):
 
         start_time = time.time()
 
@@ -239,8 +244,8 @@ class PathGuide:
 
         # Optional: filter out ground
         points = np.asarray(pcd.points)
-        mask = points[:, 2] > height_threshold
-        pcd = pcd.select_by_index(np.where(mask)[0])
+        # mask = points[:, 2] > height_threshold
+        # pcd = pcd.select_by_index(np.where(mask)[0])
 
         end_time = time.time()
         print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
