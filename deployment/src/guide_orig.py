@@ -8,7 +8,7 @@ import cv2
 import matplotlib.pyplot as plt
 from depth_anything_v2.dpt import DepthAnythingV2
 
-
+import rospy
 import importlib.util
 import os
 import open3d as o3d
@@ -19,15 +19,8 @@ from PIL import Image as PILImage
 
 import time
 
-# ROS 
-import rospy
-
-
 # CONSTANT 
 LOG_DIR_VIZ = "../logs_viz"
-
-
-
 
 def from_numpy(array: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(array).float()
@@ -124,9 +117,6 @@ class PathGuide:
         # TSDF init
         self.tsdf_cfg = CostMapConfig()
         self.tsdf_cost_map = TsdfCostMap(self.tsdf_cfg.general, self.tsdf_cfg.tsdf_cost_map)
-
-        # point cloud
-        self.pseudo_pcd = None
 
     def _norm_delta_to_ori_trajs(self, trajs):
         delta_tmp = (trajs + 1) / 2
@@ -291,14 +281,11 @@ class PathGuide:
         # TODO uncomment to visualize
         # vis_depth(img, depth_image)
 
-        self.pseudo_pcd = self.depth_to_pcd(depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
+        pseudo_pcd = self.depth_to_pcd(depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
         # open3d save pointcloud
-        # o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), self.pseudo_pcd)
-       
-        # self.publish_point_cloud.publish(self.o3d_to_ros(self.pseudo_pcd, frame_id="camera_link"))
+        o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), pseudo_pcd)
 
-
-        self.tsdf_cost_map.LoadPointCloud(self.pseudo_pcd)
+        self.tsdf_cost_map.LoadPointCloud(pseudo_pcd)
         data, coord = self.tsdf_cost_map.CreateTSDFMap()
 
         # data contains [tsdf_array, viz_points, ground_array]
@@ -314,9 +301,6 @@ class PathGuide:
             return self.cost_map, self.viz_points, self.ground_array
         return self.cost_map
 
-
-    def get_pseudo_pcd(self):
-        return self.pseudo_pcd
 
     def collision_cost(self, trajs, scale_factor=None):
         if self.cost_map is None:
