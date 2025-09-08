@@ -33,6 +33,7 @@ import numpy as np
 import argparse
 import yaml
 import time
+import struct
 
 # Viz camera overlay
 from cv_bridge import CvBridge
@@ -72,7 +73,8 @@ ACTION_STATS['max'] = np.array([5, 4])
 # TODO make it a config file instead
 bridge = CvBridge()
 
-VIZ_IMAGE_SIZE = (640, 480)
+# VIZ_IMAGE_SIZE = (640, 480) # fisheye 
+VIZ_IMAGE_SIZE = (1280, 720) # oak d pro
 
 camera_height = 0.10 # oak approx 0.10 fisheye approx 0.25 HEIGHT FROM ROBOT BASE
 camera_x_offset = 0.10
@@ -435,17 +437,6 @@ def pos_callback(msg):
 def main(args: argparse.Namespace):
     global context_size, robo_pos, robo_orientation, rela_pos
 
-
-    # TODO CLEANUP THIS MAKE IT PROPER
-    def publish_point_cloud(event, pathguide, point_cloud_pub):
-        global last_msg
-        pseudo_pcd = pathguide.get_pseudo_pcd()
-        if pseudo_pcd is not None:
-            last_msg = o3d_to_ros(pseudo_pcd, frame_id="camera_link")
-
-        if last_msg is not None:
-            point_cloud_pub.publish(last_msg)
-
      # load model parameters
     with open(MODEL_CONFIG_PATH, "r") as f:
         model_paths = yaml.safe_load(f)
@@ -524,6 +515,7 @@ def main(args: argparse.Namespace):
     all_path_pub = rospy.Publisher("visualization_marker_array", MarkerArray, queue_size=10)
     cam_wp_viz_pub = rospy.Publisher("/topoplan/wps_overlay_img", Image, queue_size=10)
     point_cloud_pub = rospy.Publisher("/vint_navid/point_cloud", PointCloud2, latch=True, queue_size=1)
+    depth_pub = rospy.Publisher("/topoplan/depth_img", Image, queue_size=10)
 
 
 
@@ -556,8 +548,14 @@ def main(args: argparse.Namespace):
 
                 # TODO have another condition above is also storing which takes time    
                 pseudo_pcd = pathguide.get_pseudo_pcd()
-                point_cloud_msg = o3d_to_ros(pseudo_pcd, frame_id="camera_link")
-                point_cloud_pub.publish(point_cloud_msg)
+                point_cloud_msg = o3d_to_ros(pseudo_pcd, frame_id="oak-d-base-frame")
+                rospy.Timer(rospy.Duration(0.2), lambda event: point_cloud_pub.publish(point_cloud_msg))
+
+                # Publish depth image
+                depth_img = bridge.cv2_to_imgmsg(pathguide.get_depth_img())
+                depth_img.header.stamp = rospy.Time.now()
+                # depth_img.encoding = "32FC1"
+                depth_pub.publish(depth_img)
 
                 obs_images = torch.split(obs_images, 3, dim=1)
                 obs_images = torch.cat(obs_images, dim=1) 

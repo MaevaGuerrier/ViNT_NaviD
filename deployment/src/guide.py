@@ -127,6 +127,7 @@ class PathGuide:
 
         # point cloud
         self.pseudo_pcd = None
+        self.depth_image = None
 
     def _norm_delta_to_ori_trajs(self, trajs):
         delta_tmp = (trajs + 1) / 2
@@ -158,10 +159,10 @@ class PathGuide:
         
         return squared_scale.to(self.device)
 
-    def depth_to_pcd_inverse_depth(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+    def depth_to_pcd_orig(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
         start_time = time.time()
         height, width = depth_image.shape
-        print("height: ", height, "width: ", width)
+        # print("height: ", height, "width: ", width)
         fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
         cx, cy = camera_intrinsics[0, 2] * resize_factor, camera_intrinsics[1, 2] * resize_factor
         
@@ -223,43 +224,69 @@ class PathGuide:
         
         return point_cloud
 
-    def depth_to_pcd(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.3, max_distance=30.0):
+    def depth_to_pcd(self, rgb_img, depth_img, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+
+
+        # print(type(rgb_img))
+        # print(type(depth_img))
 
         start_time = time.time()
 
-        height, width = depth_image.shape
+        height, width = depth_img.shape
         fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
         cx, cy = camera_intrinsics[0, 2] * resize_factor, camera_intrinsics[1, 2] * resize_factor
-
-        # Convert depth to Open3D Image
-        depth_o3d = o3d.geometry.Image(depth_image.astype(np.float32))
 
         # Intrinsics in Open3D format
         intrinsic = o3d.camera.PinholeCameraIntrinsic(
             width, height, fx, fy, cx, cy
         )
 
-        # Ensure extrinsics is homogeneous 4x4
+        # # Ensure extrinsics is homogeneous 4x4
         extrinsics = camera_extrinsics.astype(np.float64)
 
-        # Generate point cloud (C++ optimized)
-        pcd = o3d.geometry.PointCloud.create_from_depth_image(
-            depth_o3d,
-            intrinsic,
-            np.linalg.inv(extrinsics),   # Open3D expects camera pose, so invert extrinsics
-            depth_scale=1.0,             # adjust if depth is not in meters
-            depth_trunc=max_distance,
-            stride=1                     # >1 will downsample for even faster speed
-        )
+        depth_o3d = o3d.geometry.Image(depth_img.astype(np.uint16))
+        rgb_od3 = o3d.geometry.Image(rgb_img.astype(np.uint8))
 
-        # Optional: filter out ground
+        o3d.io.write_image(os.path.join(LOG_DIR_VIZ, f'03d_rgb_image.png'), rgb_od3)
+        o3d.io.write_image(os.path.join(LOG_DIR_VIZ, f'o3d_depth_image.png'), depth_o3d)
+
+        # print shape of depth and rgb
+        print(depth_o3d)
+        print(rgb_od3)
+
+        # rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(rgb_od3, depth_o3d, convert_rgb_to_intensity = False)
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(rgb_od3, depth_o3d, depth_scale=1000.0, depth_trunc=max_distance, convert_rgb_to_intensity=False)
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic, extrinsics, project_valid_depth_only = True)
+
+        # flip the orientation, so it looks upright, not upside-down
+        # pcd.transform([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
+
+
+ 
+
+        # # Generate point cloud (C++ optimized)
+        # pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        #     depth_o3d,
+        #     intrinsic,
+        #     np.linalg.inv(extrinsics),   # Open3D expects camera pose, so invert extrinsics
+        #     depth_scale=1.0,             # adjust if depth is not in meters
+        #     depth_trunc=max_distance,
+        #     stride=1                     # >1 will downsample for even faster speed
+        # )
+
+        # # Optional: filter out ground
         points = np.asarray(pcd.points)
-        mask = points[:, 2] > height_threshold
-        pcd = pcd.select_by_index(np.where(mask)[0])
+        # mask = points[:, 2] > height_threshold
+        # pcd = pcd.select_by_index(np.where(mask)[0])
 
         end_time = time.time()
+
+        pcd.points = o3d.utility.Vector3dVector(points)
+
         print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
             f"({len(pcd.points)} points)")
+
+
 
         return pcd
 
@@ -285,17 +312,21 @@ class PathGuide:
         new_size = (int(original_width * resize_factor), int(original_height * resize_factor))
         # import pdb; pdb.set_trace()
         img = img.resize(new_size)
+        img_cv2 = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-        depth_image = self.model.infer_image(cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR))
+        self.depth_image = self.model.infer_image(img_cv2)
+        # TODO SEE IF NORMALIZATION IS NEEDED THEY DID NOT DO IT HERE
+        self.depth_image = (self.depth_image - self.depth_image.min()) / (self.depth_image.max() - self.depth_image.min()) * 255.0
+        self.depth_image = self.depth_image.astype(np.uint8)
         # print("Depth image generated")
         # TODO uncomment to visualize
-        # vis_depth(img, depth_image)
+        # vis_depth(img, self.depth_image)
 
-        self.pseudo_pcd = self.depth_to_pcd(depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
+        self.pseudo_pcd = self.depth_to_pcd(img_cv2, self.depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
         # open3d save pointcloud
-        # o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), self.pseudo_pcd)
-       
-        # self.publish_point_cloud.publish(self.o3d_to_ros(self.pseudo_pcd, frame_id="camera_link"))
+        o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), self.pseudo_pcd)
+        # print(f"debug plc {self.pseudo_pcd.points[13618]}")
+        # exit()
 
 
         self.tsdf_cost_map.LoadPointCloud(self.pseudo_pcd)
@@ -317,6 +348,9 @@ class PathGuide:
 
     def get_pseudo_pcd(self):
         return self.pseudo_pcd
+
+    def get_depth_img(self):
+        return self.depth_image
 
     def collision_cost(self, trajs, scale_factor=None):
         if self.cost_map is None:
