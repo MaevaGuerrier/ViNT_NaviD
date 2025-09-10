@@ -7,15 +7,20 @@ train/gnm_dataset/*
 
 
 *.jpg
+*.png
 *.pth
 *.mp4
 *.gif
+*.ply
 
 deployment/model_weights/*
 deployment/topomaps/*
 
 .vscode/*
 */.vscode/*
+
+town01
+town01/*
 
 
 # Byte-compiled / optimized / DLL files

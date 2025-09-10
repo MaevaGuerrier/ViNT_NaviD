@@ -61,10 +61,9 @@ class PathGuide:
         self.guide_cfgs = guide_cfgs
         self.mse_loss = nn.MSELoss(reduction='mean')
         self.l1_loss = nn.L1Loss(reduction='mean')
-        self.robot_width = 0.3 # TODO robot width 
+        self.robot_width = 0.7 # TODO robot width 
         self.spatial_resolution = 0.1
         self.max_distance = 10
-        self.bev_dist = self.max_distance / self.spatial_resolution
         self.delta_min = from_numpy(ACTION_STATS['min']).to(self.device)
         self.delta_max = from_numpy(ACTION_STATS['max']).to(self.device)
         
@@ -112,13 +111,15 @@ class PathGuide:
             'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
         }
         encoder = 'vits' # or 'vits', 'vitb', 'vitg'
-        self.model = DepthAnythingV2(**model_configs[encoder])
+        # max_depth 20 for indoor model, 80 for outdoor model
+        self.model = DepthAnythingV2(**{**model_configs[encoder]})
         # package_name = 'depth_anything_v2'
         # package_spec = importlib.util.find_spec(package_name)
         # if package_spec is None:
         #     raise ImportError(f"Package '{package_name}' not found")
         # package_path = os.path.dirname(package_spec.origin)
-        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth'))
+        # USING DEPTH ANYTHING WITH METRIC DEPTH ESTIMATION INSTEAD OF FOLLOWING NAVID CODEBASE
+        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_metric_hypersim_{encoder}.pth'))
         self.model = self.model.to(self.device).eval()
 
         # TSDF init
@@ -244,49 +245,24 @@ class PathGuide:
         # # Ensure extrinsics is homogeneous 4x4
         extrinsics = camera_extrinsics.astype(np.float64)
 
-        depth_o3d = o3d.geometry.Image(depth_img.astype(np.uint16))
         rgb_od3 = o3d.geometry.Image(rgb_img.astype(np.uint8))
 
         o3d.io.write_image(os.path.join(LOG_DIR_VIZ, f'03d_rgb_image.png'), rgb_od3)
-        o3d.io.write_image(os.path.join(LOG_DIR_VIZ, f'o3d_depth_image.png'), depth_o3d)
+        print("writing rgb")
+        o3d.io.write_image(os.path.join(LOG_DIR_VIZ, f'o3d_depth_image.png'), o3d.geometry.Image(depth_img.astype(np.uint8))) # To save as png we need to convert to uint8
+        print("writing depth")
 
-        # print shape of depth and rgb
-        print(depth_o3d)
-        print(rgb_od3)
+        # Open3D expects depth in uint16 format with depth scale
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(rgb_od3, o3d.geometry.Image(depth_img.astype(np.uint16)), depth_scale=1000.0, depth_trunc=max_distance, convert_rgb_to_intensity=False)
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic, np.linalg.inv(extrinsics), project_valid_depth_only = True)
+        # doing np.lineealg.inv so that the point cloud is correctly shifted to be upright
 
-        # rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(rgb_od3, depth_o3d, convert_rgb_to_intensity = False)
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(rgb_od3, depth_o3d, depth_scale=1000.0, depth_trunc=max_distance, convert_rgb_to_intensity=False)
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic, extrinsics, project_valid_depth_only = True)
-
-        # flip the orientation, so it looks upright, not upside-down
-        # pcd.transform([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
-
-
- 
-
-        # # Generate point cloud (C++ optimized)
-        # pcd = o3d.geometry.PointCloud.create_from_depth_image(
-        #     depth_o3d,
-        #     intrinsic,
-        #     np.linalg.inv(extrinsics),   # Open3D expects camera pose, so invert extrinsics
-        #     depth_scale=1.0,             # adjust if depth is not in meters
-        #     depth_trunc=max_distance,
-        #     stride=1                     # >1 will downsample for even faster speed
-        # )
-
-        # # Optional: filter out ground
         points = np.asarray(pcd.points)
-        # mask = points[:, 2] > height_threshold
-        # pcd = pcd.select_by_index(np.where(mask)[0])
-
         end_time = time.time()
-
         pcd.points = o3d.utility.Vector3dVector(points)
 
-        print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
-            f"({len(pcd.points)} points)")
-
-
+        # print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
+        #     f"({len(pcd.points)} points)")
 
         return pcd
 
@@ -306,26 +282,52 @@ class PathGuide:
         )
         return world_ps_inflated
 
-    def get_cost_map_via_tsdf(self, img):
-        original_width, original_height = img.size
-        resize_factor = 1 # original value was 1
-        new_size = (int(original_width * resize_factor), int(original_height * resize_factor))
-        # import pdb; pdb.set_trace()
-        img = img.resize(new_size)
-        img_cv2 = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    def get_cost_map_via_tsdf(self, img_pil: PILImage.Image):
+        width, height = img_pil.size
+        # resize_factor = 1 # original value was 1
+        # new_size = (int(original_width * resize_factor), int(original_height * resize_factor))
+        # # import pdb; pdb.set_trace()
+        # img = img.resize(new_size)
+        # img_cv2 = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-        self.depth_image = self.model.infer_image(img_cv2)
-        # TODO SEE IF NORMALIZATION IS NEEDED THEY DID NOT DO IT HERE
-        self.depth_image = (self.depth_image - self.depth_image.min()) / (self.depth_image.max() - self.depth_image.min()) * 255.0
-        self.depth_image = self.depth_image.astype(np.uint8)
+        img = np.array(img_pil)
+
+        self.depth_image = self.model.infer_image(img, height)
+        # # TODO SEE IF NORMALIZATION IS NEEDED THEY DID NOT DO IT HERE
+        # self.depth_image = (self.depth_image - self.depth_image.min()) / (self.depth_image.max() - self.depth_image.min()) * 255.0
+        # self.depth_image = self.depth_image.astype(np.uint8)
         # print("Depth image generated")
         # TODO uncomment to visualize
         # vis_depth(img, self.depth_image)
 
-        self.pseudo_pcd = self.depth_to_pcd(img_cv2, self.depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
+        # My working point cloud function
+        # self.pseudo_pcd = self.depth_to_pcd(img_cv2, self.depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
+        # Using depth anything with metric estimation point cloud function
+
+        # From https://github.com/DepthAnything/Depth-Anything-V2/blob/main/metric_depth/depth_to_pointcloud.py
+        # Resize depth prediction to match the original image size
+        resized_pred = PILImage.fromarray(self.depth_image).resize((width, height), PILImage.NEAREST)
+        # Generate mesh grid and calculate point cloud coordinates
+        x, y = np.meshgrid(np.arange(width), np.arange(height))
+        print(self.camera_intrinsics)
+        focal_length_x = self.camera_intrinsics[0, 0]
+        focal_length_y = self.camera_intrinsics[1, 1]
+        x = (x - width / 2) / focal_length_x
+        y = (y - height / 2) / focal_length_y
+        z = np.array(resized_pred)
+        points = np.stack((np.multiply(x, z), np.multiply(y, z), z), axis=-1).reshape(-1, 3)
+        colors = np.array(img).reshape(-1, 3) / 255.0
+
+        # Create the point cloud and save it to the output directory
+        self.pseudo_pcd = o3d.geometry.PointCloud()
+        self.pseudo_pcd.points = o3d.utility.Vector3dVector(points)
+        self.pseudo_pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        print(f"({len(self.pseudo_pcd.points)} points)")
+
         # open3d save pointcloud
         o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), self.pseudo_pcd)
-        # print(f"debug plc {self.pseudo_pcd.points[13618]}")
+        print(f"debug plc {self.pseudo_pcd.points[1000]}")
         # exit()
 
 

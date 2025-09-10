@@ -489,10 +489,6 @@ def main(args: argparse.Namespace):
     rospy.init_node("EXPLORATION", anonymous=False)
     rate = rospy.Rate(RATE)
 
-    # point cloud rviz 
-    if args.visualize:
-        start_pointcloud_publisher()
-
     image_curr_msg = rospy.Subscriber(
         IMAGE_TOPIC, Image, callback_obs, queue_size=1)
 
@@ -546,10 +542,11 @@ def main(args: argparse.Namespace):
                     cost_map, viz_points, ground_array = pathguide.get_cost_map()
                     visualize_cost_map(cost_map, viz_points, ground_array)
 
-                # TODO have another condition above is also storing which takes time    
-                pseudo_pcd = pathguide.get_pseudo_pcd()
-                point_cloud_msg = o3d_to_ros(pseudo_pcd, frame_id="oak-d-base-frame")
-                rospy.Timer(rospy.Duration(0.2), lambda event: point_cloud_pub.publish(point_cloud_msg))
+                # TODO have another condition above is also storing which takes time  
+                # TODO THE SIZING IS OFF  
+                # pseudo_pcd = pathguide.get_pseudo_pcd()
+                # point_cloud_msg = o3d_to_ros(pseudo_pcd, frame_id="oak-d-base-frame") # TODO MAKE IT IN TOPICS
+                # rospy.Timer(rospy.Duration(0.2), lambda event: point_cloud_pub.publish(point_cloud_msg))
 
                 # Publish depth image
                 depth_img = bridge.cv2_to_imgmsg(pathguide.get_depth_img())
