@@ -833,7 +833,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--guide",
-        default=True,
+        default=False,
         type=bool,
     )
     parser.add_argument(

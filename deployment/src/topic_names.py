@@ -20,7 +20,7 @@ TELEOP_LAUNCH = "teleop_twist_keyboard.py"
 # image obs topics
 FRONT_IMAGE_TOPIC = "/usb_cam_front/image_raw"
 REVERSE_IMAGE_TOPIC = "/usb_cam_reverse/image_raw"
-IMAGE_TOPIC = "/oak/rgb/image_raw" #"/usb_cam/image_raw"
+IMAGE_TOPIC = "/usb_cam/image_raw" # "/oak/rgb/image_raw" #"/usb_cam/image_raw"
 # TODO Change in launch file depending on what camera you use 
 # <include file="$(find usb_cam)/launch/usb_cam-test.launch" /> for fisheye
 # 

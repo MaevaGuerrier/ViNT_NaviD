@@ -119,7 +119,7 @@ class PathGuide:
         #     raise ImportError(f"Package '{package_name}' not found")
         # package_path = os.path.dirname(package_spec.origin)
         # USING DEPTH ANYTHING WITH METRIC DEPTH ESTIMATION INSTEAD OF FOLLOWING NAVID CODEBASE
-        self.model.load_state_dict(torch.load(f'/workspace/ViNT_NaviD/Depth-Anything-V2/checkpoints/depth_anything_v2_metric_hypersim_{encoder}.pth'))
+        self.model.load_state_dict(torch.load(f'/workspace/Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth'))
         self.model = self.model.to(self.device).eval()
 
         # TSDF init
