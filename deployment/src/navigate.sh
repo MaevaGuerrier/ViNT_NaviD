@@ -13,19 +13,9 @@ tmux new-session -d -s $session_name
 # Split the window into four panes
 tmux selectp -t 0    # select the first (0) pane
 tmux splitw -h -p 50 # split it into two halves
-# tmux selectp -t 0    # select the first (0) pane
-# tmux splitw -v -p 50 # split it into two halves
-
-# tmux selectp -t 2    # select the new, second (2) pane
-# tmux splitw -v -p 50 # split it into two halves
-# tmux selectp -t 0    # go back to the first pane
-
-
 
 # Run the navigate.py script with command line args in the second pane
 tmux select-pane -t 0
-# tmux send-keys "conda activate vint_deployment" Enter
-# tmux send-keys "conda activate navidiffusor" Enter
 tmux send-keys "python3 navigate.py $@" Enter
 
 
