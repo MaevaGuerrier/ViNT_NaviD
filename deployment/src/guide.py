@@ -23,7 +23,7 @@ import time
 import rospy
 
 
-# CONSTANT 
+#CONSTANT 
 LOG_DIR_VIZ = "../logs_viz"
 
 

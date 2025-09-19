@@ -685,7 +685,7 @@ def main(args: argparse.Namespace):
                 print(f"WAYPOINT WE VIZ VALUE {chosen_waypoint}")
 
 
-                # Publisher all path 
+                # Publisher all paths 
 
                 ma = MarkerArray()
                 for idx, paths in enumerate(naction):
