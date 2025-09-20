@@ -8,26 +8,23 @@ import cv2
 import matplotlib.pyplot as plt
 from depth_anything_v2.dpt import DepthAnythingV2
 
-
+import rospy
 import importlib.util
 import os
 import open3d as o3d
 from tsdf_cost_map import TsdfCostMap
 from costmap_cfg import CostMapConfig
+from sensor_msgs.msg import PointCloud2
+import sensor_msgs.point_cloud2 as ros_pc2
+import tf2_ros
+from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
 from PIL import Image as PILImage
 
 import time
 
-# ROS 
-import rospy
-
-
-#CONSTANT 
+# CONSTANT 
 LOG_DIR_VIZ = "../logs_viz"
-
-
-
 
 def from_numpy(array: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(array).float()
@@ -64,6 +61,7 @@ class PathGuide:
         self.robot_width = 0.7 # TODO robot width 
         self.spatial_resolution = 0.1
         self.max_distance = 10
+        self.bev_dist = self.max_distance / self.spatial_resolution
         self.delta_min = from_numpy(ACTION_STATS['min']).to(self.device)
         self.delta_max = from_numpy(ACTION_STATS['max']).to(self.device)
         
@@ -81,9 +79,9 @@ class PathGuide:
         #                                     [0.0, 381.1520080566406, 250.35641479492188],
         #                                     [0.0, 0.0, 1.0]])
         # OAK lite pro
-        self.camera_intrinsics = np.array([[1017.5782470703125, 0.0, 612.1245727539062],
-                                            [0.0, 1017.5782470703125, 388.58673095703125],
-                                            [0.0, 0.0, 1.0]])
+        # self.camera_intrinsics = np.array([[1017.5782470703125, 0.0, 612.1245727539062],
+                                            # [0.0, 1017.5782470703125, 388.58673095703125],
+                                            # [0.0, 0.0, 1.0]])
 
 
         # robot to camera extrinsic
@@ -97,11 +95,18 @@ class PathGuide:
         #                             [-1, 0, 0, 0.000],
         #                             [0, -1, 0, 0.025],
         #                             [0, 0, 0, 1]])
-        # oak lite APPROX TODO again
+        # FISHEYE BUNKER 2
         self.camera_extrinsics = np.array([[0, 0, 1, 0.000],
                                     [-1, 0, 0, 0.000],
-                                    [0, -1, 0, 0.011],
+                                    [0, -1, 0, 0.018],
                                     [0, 0, 0, 1]])
+
+        self.camera_intrinsics = np.array([
+            [319.75407,   1.80869, 319.53298],
+            [  0.     , 310.83225, 238.80018],
+            [  0.     ,   0.     ,   1.     ]
+        ], dtype=np.float64)
+
 
         # depth anything v2 init
         model_configs = {
@@ -111,14 +116,12 @@ class PathGuide:
             'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
         }
         encoder = 'vits' # or 'vits', 'vitb', 'vitg'
-        # max_depth 20 for indoor model, 80 for outdoor model
-        self.model = DepthAnythingV2(**{**model_configs[encoder]})
+        self.model = DepthAnythingV2(**model_configs[encoder])
         # package_name = 'depth_anything_v2'
         # package_spec = importlib.util.find_spec(package_name)
         # if package_spec is None:
         #     raise ImportError(f"Package '{package_name}' not found")
         # package_path = os.path.dirname(package_spec.origin)
-        # USING DEPTH ANYTHING WITH METRIC DEPTH ESTIMATION INSTEAD OF FOLLOWING NAVID CODEBASE
         self.model.load_state_dict(torch.load(f'/workspace/Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth'))
         self.model = self.model.to(self.device).eval()
 
@@ -126,9 +129,9 @@ class PathGuide:
         self.tsdf_cfg = CostMapConfig()
         self.tsdf_cost_map = TsdfCostMap(self.tsdf_cfg.general, self.tsdf_cfg.tsdf_cost_map)
 
-        # point cloud
-        self.pseudo_pcd = None
-        self.depth_image = None
+        # Lazy TF2 init
+        self.tf_buffer = None
+        self.tf_listener = None
 
     def _norm_delta_to_ori_trajs(self, trajs):
         delta_tmp = (trajs + 1) / 2
@@ -160,10 +163,10 @@ class PathGuide:
         
         return squared_scale.to(self.device)
 
-    def depth_to_pcd_orig(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
+    def depth_to_pcd_inverse_depth(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
         start_time = time.time()
         height, width = depth_image.shape
-        # print("height: ", height, "width: ", width)
+        print("height: ", height, "width: ", width)
         fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
         cx, cy = camera_intrinsics[0, 2] * resize_factor, camera_intrinsics[1, 2] * resize_factor
         
@@ -225,46 +228,107 @@ class PathGuide:
         
         return point_cloud
 
-    def depth_to_pcd(self, rgb_img, depth_img, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.5, max_distance=10.0):
-
-
-        # print(type(rgb_img))
-        # print(type(depth_img))
+    def depth_to_pcd(self, depth_image, camera_intrinsics, camera_extrinsics, resize_factor=1.0, height_threshold=0.3, max_distance=30.0):
 
         start_time = time.time()
 
-        height, width = depth_img.shape
+        height, width = depth_image.shape
         fx, fy = camera_intrinsics[0, 0] * resize_factor, camera_intrinsics[1, 1] * resize_factor
         cx, cy = camera_intrinsics[0, 2] * resize_factor, camera_intrinsics[1, 2] * resize_factor
+
+        # Convert depth to Open3D Image
+        depth_o3d = o3d.geometry.Image(depth_image.astype(np.float32))
 
         # Intrinsics in Open3D format
         intrinsic = o3d.camera.PinholeCameraIntrinsic(
             width, height, fx, fy, cx, cy
         )
 
-        # # Ensure extrinsics is homogeneous 4x4
+        # Ensure extrinsics is homogeneous 4x4
         extrinsics = camera_extrinsics.astype(np.float64)
 
-        rgb_od3 = o3d.geometry.Image(rgb_img.astype(np.uint8))
+        # Generate point cloud (C++ optimized)
+        pcd = o3d.geometry.PointCloud.create_from_depth_image(
+            depth_o3d,
+            intrinsic,
+            np.linalg.inv(extrinsics),   # Open3D expects camera pose, so invert extrinsics
+            depth_scale=1.0,             # adjust if depth is not in meters
+            depth_trunc=max_distance,
+            stride=1                     # >1 will downsample for even faster speed
+        )
 
-        o3d.io.write_image(os.path.join(LOG_DIR_VIZ, f'03d_rgb_image.png'), rgb_od3)
-        print("writing rgb")
-        o3d.io.write_image(os.path.join(LOG_DIR_VIZ, f'o3d_depth_image.png'), o3d.geometry.Image(depth_img.astype(np.uint8))) # To save as png we need to convert to uint8
-        print("writing depth")
-
-        # Open3D expects depth in uint16 format with depth scale
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(rgb_od3, o3d.geometry.Image(depth_img.astype(np.uint16)), depth_scale=1000.0, depth_trunc=max_distance, convert_rgb_to_intensity=False)
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic, np.linalg.inv(extrinsics), project_valid_depth_only = True)
-        # doing np.lineealg.inv so that the point cloud is correctly shifted to be upright
-
+        # Optional: filter out ground
         points = np.asarray(pcd.points)
-        end_time = time.time()
-        pcd.points = o3d.utility.Vector3dVector(points)
+        mask = points[:, 2] > height_threshold
+        pcd = pcd.select_by_index(np.where(mask)[0])
 
-        # print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
-        #     f"({len(pcd.points)} points)")
+        end_time = time.time()
+        print(f"[depth_to_pcd] Point cloud generation time: {end_time - start_time:.4f} seconds "
+            f"({len(pcd.points)} points)")
 
         return pcd
+
+    def _ensure_tf(self):
+        if self.tf_buffer is None or self.tf_listener is None:
+            self.tf_buffer = tf2_ros.Buffer()
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
+    def _pointcloud2_to_o3d(self, cloud_msg: PointCloud2, height_threshold: float = 0.3, max_distance: float = 30.0):
+        points = []
+        for x, y, z in ros_pc2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True):
+            if np.isfinite(x) and np.isfinite(y) and np.isfinite(z):
+                if z > height_threshold:
+                    if (x * x + y * y + z * z) <= (max_distance * max_distance):
+                        points.append([x, y, z])
+
+        if len(points) == 0:
+            return o3d.geometry.PointCloud()
+
+        points_np = np.asarray(points, dtype=np.float64)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points_np)
+        return pcd
+
+    def get_cost_map_from_ros_topic(self, topic: str = "/depth_anything/depth_registered/points", target_frame: str = "base_link", timeout: float = 1.0, height_threshold: float = 0.3, max_distance: float = 30.0):
+        if not rospy.core.is_initialized():
+            rospy.logwarn("ROS node not initialized; skipping get_cost_map_from_ros_topic")
+            self.cost_map = None
+            return
+
+        self._ensure_tf()
+
+        try:
+            cloud_msg = rospy.wait_for_message(topic, PointCloud2, timeout=timeout)
+        except rospy.ROSException as e:
+            rospy.logwarn(f"Timeout waiting for PointCloud2 on {topic}: {e}")
+            self.cost_map = None
+            return
+
+        source_frame = cloud_msg.header.frame_id
+        if source_frame.startswith("/"):
+            source_frame = source_frame[1:]
+
+        try:
+            # Use stamped time if available, otherwise latest transform
+            query_time = cloud_msg.header.stamp if cloud_msg.header.stamp != rospy.Time() else rospy.Time(0)
+            transform = self.tf_buffer.lookup_transform(target_frame, source_frame, query_time, rospy.Duration(timeout))
+            cloud_in_target = do_transform_cloud(cloud_msg, transform)
+        except Exception as e:
+            rospy.logwarn(f"Failed to transform cloud from {source_frame} to {target_frame}: {e}")
+            self.cost_map = None
+            return
+
+        o3d_cloud = self._pointcloud2_to_o3d(cloud_in_target, height_threshold=height_threshold, max_distance=max_distance)
+
+        self.tsdf_cost_map.LoadPointCloud(o3d_cloud)
+        data, coord = self.tsdf_cost_map.CreateTSDFMap()
+
+        if data is None:
+            self.cost_map = None
+        else:
+            self.cost_map = torch.tensor(data[0]).requires_grad_(False).to(self.device)
+            self.viz_points = data[1]
+            self.ground_array = data[2]
 
     def add_robot_dim(self, world_ps):
         tangent = world_ps[:, 1:, 0:2] - world_ps[:, :-1, 0:2]
@@ -282,56 +346,23 @@ class PathGuide:
         )
         return world_ps_inflated
 
-    def get_cost_map_via_tsdf(self, img_pil: PILImage.Image):
-        width, height = img_pil.size
-        # resize_factor = 1 # original value was 1
-        # new_size = (int(original_width * resize_factor), int(original_height * resize_factor))
-        # # import pdb; pdb.set_trace()
-        # img = img.resize(new_size)
-        # img_cv2 = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    def get_cost_map_via_tsdf(self, img):
+        original_width, original_height = img.size
+        resize_factor = 1 # original value was 1
+        new_size = (int(original_width * resize_factor), int(original_height * resize_factor))
+        # import pdb; pdb.set_trace()
+        img = img.resize(new_size)
 
-        img = np.array(img_pil)
-
-        self.depth_image = self.model.infer_image(img, height)
-        # # TODO SEE IF NORMALIZATION IS NEEDED THEY DID NOT DO IT HERE
-        # self.depth_image = (self.depth_image - self.depth_image.min()) / (self.depth_image.max() - self.depth_image.min()) * 255.0
-        # self.depth_image = self.depth_image.astype(np.uint8)
+        depth_image = self.model.infer_image(cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR))
         # print("Depth image generated")
         # TODO uncomment to visualize
-        # vis_depth(img, self.depth_image)
+        # vis_depth(img, depth_image)
 
-        # My working point cloud function
-        # self.pseudo_pcd = self.depth_to_pcd(img_cv2, self.depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
-        # Using depth anything with metric estimation point cloud function
-
-        # From https://github.com/DepthAnything/Depth-Anything-V2/blob/main/metric_depth/depth_to_pointcloud.py
-        # Resize depth prediction to match the original image size
-        resized_pred = PILImage.fromarray(self.depth_image).resize((width, height), PILImage.NEAREST)
-        # Generate mesh grid and calculate point cloud coordinates
-        x, y = np.meshgrid(np.arange(width), np.arange(height))
-        print(self.camera_intrinsics)
-        focal_length_x = self.camera_intrinsics[0, 0]
-        focal_length_y = self.camera_intrinsics[1, 1]
-        x = (x - width / 2) / focal_length_x
-        y = (y - height / 2) / focal_length_y
-        z = np.array(resized_pred)
-        points = np.stack((np.multiply(x, z), np.multiply(y, z), z), axis=-1).reshape(-1, 3)
-        colors = np.array(img).reshape(-1, 3) / 255.0
-
-        # Create the point cloud and save it to the output directory
-        self.pseudo_pcd = o3d.geometry.PointCloud()
-        self.pseudo_pcd.points = o3d.utility.Vector3dVector(points)
-        self.pseudo_pcd.colors = o3d.utility.Vector3dVector(colors)
-
-        print(f"({len(self.pseudo_pcd.points)} points)")
-
+        pseudo_pcd = self.depth_to_pcd(depth_image, self.camera_intrinsics, self.camera_extrinsics, resize_factor=resize_factor)
         # open3d save pointcloud
-        o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), self.pseudo_pcd)
-        print(f"debug plc {self.pseudo_pcd.points[1000]}")
-        # exit()
+        # o3d.io.write_point_cloud(os.path.join(LOG_DIR_VIZ, f'depth_image.ply'), pseudo_pcd)
 
-
-        self.tsdf_cost_map.LoadPointCloud(self.pseudo_pcd)
+        self.tsdf_cost_map.LoadPointCloud(pseudo_pcd)
         data, coord = self.tsdf_cost_map.CreateTSDFMap()
 
         # data contains [tsdf_array, viz_points, ground_array]
@@ -348,15 +379,13 @@ class PathGuide:
         return self.cost_map
 
 
-    def get_pseudo_pcd(self):
-        return self.pseudo_pcd
-
-    def get_depth_img(self):
-        return self.depth_image
-
     def collision_cost(self, trajs, scale_factor=None):
         if self.cost_map is None:
-            return torch.zeros(trajs.shape)
+            # Return zero gradient and no cost list when cost map is unavailable
+            zero_grad = torch.zeros_like(trajs)
+            generate_scale = self.generate_scale(trajs.shape[1])
+            return generate_scale.unsqueeze(1).unsqueeze(0) * zero_grad, None
+        print("cost map is not None")
         batch_size, num_p, _ = trajs.shape
         trajs_ori = self._norm_delta_to_ori_trajs(trajs)
         trajs_ori = self.add_robot_dim(trajs_ori)
@@ -387,7 +416,9 @@ class PathGuide:
             cost = collision_cost
         return cost, cost_list
 
-
+    # NOT IN ORIG CODE - debuging purpose or viz
+    def get_depth_img(self):
+        return self.depth_image
 
 class PathOpt:
     def __init__(self):

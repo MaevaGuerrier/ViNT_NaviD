@@ -57,17 +57,17 @@ class TsdfCostMap:
         # print("number of obs points: %d, free points: %d" % (self.obs_points.shape[0], self.free_points.shape[0]))
 
     # NOT USED IN THIS CODE AT ALL
-    def ReadPointFromFile(self):
-        pcd_load = o3d.io.read_point_cloud(os.path.join(self._cfg_general.root_path, self._cfg_general.ply_file))
-        obs_p, free_p = self.TerrainAnalysis(np.asarray(pcd_load.points))
-        # print("point cloud loaded, total points: %d" % (np.asarray(pcd_load.points).shape[0]))
-        self.UpdatePCDwithPs(obs_p, free_p, is_downsample=True)
-        if self._cfg_tsdf.filter_outliers:
-            obs_p = self.FilterCloud(self.obs_points)
-            free_p = self.FilterCloud(self.free_points, outlier_filter=False)
-            self.UpdatePCDwithPs(obs_p, free_p)
-        self.UpdateMapParams()
-        return[]
+    # def ReadPointFromFile(self):
+    #     pcd_load = o3d.io.read_point_cloud(os.path.join(self._cfg_general.root_path, self._cfg_general.ply_file))
+    #     obs_p, free_p = self.TerrainAnalysis(np.asarray(pcd_load.points))
+    #     # print("point cloud loaded, total points: %d" % (np.asarray(pcd_load.points).shape[0]))
+    #     self.UpdatePCDwithPs(obs_p, free_p, is_downsample=True)
+    #     if self._cfg_tsdf.filter_outliers:
+    #         obs_p = self.FilterCloud(self.obs_points)
+    #         free_p = self.FilterCloud(self.free_points, outlier_filter=False)
+    #         self.UpdatePCDwithPs(obs_p, free_p)
+    #     self.UpdateMapParams()
+    #     return[]
 
         
     

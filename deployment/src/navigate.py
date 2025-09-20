@@ -73,10 +73,10 @@ ACTION_STATS['max'] = np.array([5, 4])
 # TODO make it a config file instead
 bridge = CvBridge()
 
-# VIZ_IMAGE_SIZE = (640, 480) # fisheye 
-VIZ_IMAGE_SIZE = (1280, 720) # oak d pro
+VIZ_IMAGE_SIZE = (640, 480) # fisheye (both bunker 1 & 2)
+# VIZ_IMAGE_SIZE = (1280, 720) # oak d pro
 
-camera_height = 0.10 # oak approx 0.10 fisheye approx 0.25 HEIGHT FROM ROBOT BASE
+camera_height = 0.18 # oak approx 0.10 fisheye bunk1 approx 0.25  fisheye bun2 0.18HEIGHT FROM ROBOT BASE
 camera_x_offset = 0.10
 
 
@@ -97,11 +97,11 @@ print("Using device:", device)
 
 # OAK 
 
-camera_matrix = np.array([[1017.5782470703125, 0.0, 612.1245727539062],
-                          [0.0, 1017.5782470703125, 388.58673095703125],
-                          [0.0, 0.0, 1.0]], dtype=np.float64)
+# camera_matrix = np.array([[1017.5782470703125, 0.0, 612.1245727539062],
+#                           [0.0, 1017.5782470703125, 388.58673095703125],
+#                           [0.0, 0.0, 1.0]], dtype=np.float64)
 
-# FISHEYE
+# FISHEYE BUNKER 1 
 # camera_matrix = np.array([
 #     [262.459286,   1.916160, 327.699961],
 #     [  0.000000, 263.419908, 224.459372],
@@ -115,7 +115,19 @@ camera_matrix = np.array([[1017.5782470703125, 0.0, 612.1245727539062],
 #         0.00581938967971292
 # ], dtype=np.float64)
 
+# FISHEYE BUNKER 2
+camera_matrix = np.array([
+    [319.75407,   1.80869, 319.53298],
+    [  0.     , 310.83225, 238.80018],
+    [  0.     ,   0.     ,   1.     ]
+], dtype=np.float64)
 
+dist_coeffs = np.array([
+    0.052961, 
+    -1.747018, 
+    3.352134, 
+    -0.019135
+    ], dtype=np.float64)
 
 def o3d_to_ros(pcd, frame_id="camera_link"):
     points = np.asarray(pcd.points)
@@ -465,6 +477,10 @@ def main(args: argparse.Namespace):
     model = model.to(device)
     model.eval()
 
+    # ROS node must be initialized before creating PathGuide (for TF2 time)
+    rospy.init_node("EXPLORATION", anonymous=False)
+    rate = rospy.Rate(RATE)
+
     pathguide = PathGuide(device, ACTION_STATS)
     pathopt = PathOpt()
      # load topomap
@@ -486,8 +502,6 @@ def main(args: argparse.Namespace):
         goal_node = args.goal_node
 
      # ROS
-    rospy.init_node("EXPLORATION", anonymous=False)
-    rate = rospy.Rate(RATE)
 
     image_curr_msg = rospy.Subscriber(
         IMAGE_TOPIC, Image, callback_obs, queue_size=1)
@@ -512,6 +526,7 @@ def main(args: argparse.Namespace):
     cam_wp_viz_pub = rospy.Publisher("/topoplan/wps_overlay_img", Image, queue_size=10)
     point_cloud_pub = rospy.Publisher("/vint_navid/point_cloud", PointCloud2, latch=True, queue_size=1)
     depth_pub = rospy.Publisher("/topoplan/depth_img", Image, queue_size=10)
+    pseudo_costmap_pub = rospy.Publisher("/topoplan/pseudo_costmap", Image, queue_size=10)
 
 
 
@@ -536,7 +551,23 @@ def main(args: argparse.Namespace):
                 obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False)
                 print(f"context queue contains {len(context_queue)} images")
                 if args.guide:
-                    pathguide.get_cost_map_via_tsdf(context_queue[-1])
+                    if getattr(args, "use_ros_cloud", True):
+                        pathguide.get_cost_map_from_ros_topic(topic="/depth_anything/depth_registered/points", target_frame="base_link", timeout=0.5)
+                    else:
+                        pathguide.get_cost_map_via_tsdf(context_queue[-1])
+                    # Publish pseudo-depth TSDF costmap as mono8 image
+                    try:
+                        cm = pathguide.get_cost_map(extra_info=False)
+                        if cm is not None:
+                            cm_np = cm.detach().cpu().numpy()
+                            cm_norm = cv2.normalize(cm_np, None, 0, 255, cv2.NORM_MINMAX)
+                            cm_uint8 = cm_norm.astype(np.uint8)
+                            cm_msg = bridge.cv2_to_imgmsg(cm_uint8, encoding="mono8")
+                            cm_msg.header.stamp = rospy.Time.now()
+                            cm_msg.header.frame_id = "base_link"
+                            pseudo_costmap_pub.publish(cm_msg)
+                    except Exception as e:
+                        rospy.logwarn(f"Failed to publish pseudo costmap: {e}")
 
                 if args.visualize:
                     cost_map, viz_points, ground_array = pathguide.get_cost_map()
@@ -549,10 +580,11 @@ def main(args: argparse.Namespace):
                 # rospy.Timer(rospy.Duration(0.2), lambda event: point_cloud_pub.publish(point_cloud_msg))
 
                 # Publish depth image
-                depth_img = bridge.cv2_to_imgmsg(pathguide.get_depth_img())
-                depth_img.header.stamp = rospy.Time.now()
-                # depth_img.encoding = "32FC1"
-                depth_pub.publish(depth_img)
+                if args.guide and args.visualize:
+                    depth_img = bridge.cv2_to_imgmsg(pathguide.get_depth_img())
+                    depth_img.header.stamp = rospy.Time.now()
+                    # depth_img.encoding = "32FC1"
+                    depth_pub.publish(depth_img)
 
                 obs_images = torch.split(obs_images, 3, dim=1)
                 obs_images = torch.cat(obs_images, dim=1) 
@@ -638,6 +670,7 @@ def main(args: argparse.Namespace):
                     noise_scheduler.set_timesteps(num_diffusion_iters)
                 
                 start_time = time.time()
+                start_time_guide = None
                 for k in noise_scheduler.timesteps[:]:
                     with torch.no_grad():
                         # predict noise
@@ -653,22 +686,28 @@ def main(args: argparse.Namespace):
                             timestep=k,
                             sample=naction
                         ).prev_sample
+                    
                     if args.guide:
+                        start_time_guide = time.time() if start_time_guide is None else start_time_guide
                         interval1 = 6
                         period = 1
                         if k <= interval1:
                             if k % period == 0:
                                     if k > 2:
-                                        grad, cost_list = pathguide.get_gradient(naction, goal_pos=rela_pos, scale_factor=scale_factor)
+                                        grad, cost_list = pathguide.get_gradient(naction, goal_pos=None, scale_factor=scale_factor)
                                         grad_scale = 1.0
                                         naction -= grad_scale * grad
                                     else:
                                         if k>=0 and k <= 2:
                                             naction_tmp = naction.detach().clone()
                                             for i in range(1):
-                                                grad, cost_list = pathguide.get_gradient(naction_tmp, goal_pos=rela_pos, scale_factor=scale_factor)
+                                                grad, cost_list = pathguide.get_gradient(naction_tmp, goal_pos=None, scale_factor=scale_factor)
                                                 naction_tmp -= grad
                                             naction = naction_tmp
+
+                print("time elapsed Nomad pred:", time.time() - start_time)
+                if args.guide:
+                    print("time elapsed diffusion k guidance:", time.time() - start_time_guide)
 
                 naction = to_numpy(get_action(naction))
                 naction_selected, selected_num = pathopt.select_trajectory(naction, l=args.waypoint, angle_threshold=45)
@@ -833,7 +872,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--guide",
-        default=False,
+        default=True,
         type=bool,
     )
     parser.add_argument(
@@ -846,6 +885,13 @@ if __name__ == "__main__":
         "--visualize",
         default=False,
         type=bool,
+    )
+
+    parser.add_argument(
+        "--use-ros-cloud",
+        default=True,
+        type=bool,
+        help="Use ROS topic instead of local depth anything",
     )
 
     args = parser.parse_args()
