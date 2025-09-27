@@ -11,18 +11,12 @@ import yaml
 import tracemalloc
 
 # ROS
-import sensor_msgs.point_cloud2 as pc2
-from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import Header
-
-# Point coud 
 import rospy
-import threading
 from sensor_msgs.msg import Image
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, PoseStamped
 from std_msgs.msg import Bool, Float32MultiArray
-from utils import msg_to_pil, to_numpy, transform_images, load_model, rotate_point_by_quaternion, pil_to_msg, pil_to_numpy_array
+from utils import msg_to_pil, to_numpy, transform_images, load_model, rotate_point_by_quaternion
 
 from vint_train.training.train_utils import get_action
 from vint_train.visualizing.action_utils import plot_trajs_and_points
@@ -33,15 +27,6 @@ import numpy as np
 import argparse
 import yaml
 import time
-import struct
-
-# Viz camera overlay
-from cv_bridge import CvBridge
-import cv2
-
-# Costmap viz
-from cost_to_pcd import CostMapPCD
-from costmap_cfg import CostMapConfig, Loader
 
 # UTILS
 from topic_names import (IMAGE_TOPIC,
@@ -50,7 +35,6 @@ from topic_names import (IMAGE_TOPIC,
                         POS_TOPIC,
                         SAMPLED_ACTIONS_TOPIC,
                         VISUAL_MARKER_TOPIC)
-
 
 
 # CONSTANTS
@@ -66,20 +50,9 @@ RATE = robot_config["frame_rate"]
 ACTION_STATS = {}
 ACTION_STATS['min'] = np.array([-2.5, -4])
 ACTION_STATS['max'] = np.array([5, 4])
+VIZ_IMAGE_SIZE = (640, 480)
 
 # GLOBALS
-
-
-# TODO make it a config file instead
-bridge = CvBridge()
-
-VIZ_IMAGE_SIZE = (640, 480) # fisheye (both bunker 1 & 2)
-# VIZ_IMAGE_SIZE = (1280, 720) # oak d pro
-
-camera_height = 0.18 # oak approx 0.10 fisheye bunk1 approx 0.25  fisheye bun2 0.18HEIGHT FROM ROBOT BASE
-camera_x_offset = 0.10
-
-
 context_queue = []
 context_size = None  
 subgoal = []
@@ -91,187 +64,141 @@ rela_pos = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
+############# SIM ##########################################
 
 
-# TODO CLEANUP MAKE IT CONFIG FILE AND DYNAMIC
-
-# OAK 
-
-# camera_matrix = np.array([[1017.5782470703125, 0.0, 612.1245727539062],
-#                           [0.0, 1017.5782470703125, 388.58673095703125],
-#                           [0.0, 0.0, 1.0]], dtype=np.float64)
-
-# FISHEYE BUNKER 1 
-# camera_matrix = np.array([
-#     [262.459286,   1.916160, 327.699961],
-#     [  0.000000, 263.419908, 224.459372],
-#     [  0.000000,   0.000000,   1.000000]
-# ], dtype=np.float64)
-
-# dist_coeffs = np.array([
-#     -0.03727222045233312, 
-#         0.007588870705292973,
-#     -0.01666117486022043, 
-#         0.00581938967971292
-# ], dtype=np.float64)
-
-# FISHEYE BUNKER 2
-camera_matrix = np.array([
-    [319.75407,   1.80869, 319.53298],
-    [  0.     , 310.83225, 238.80018],
-    [  0.     ,   0.     ,   1.     ]
-], dtype=np.float64)
-
-dist_coeffs = np.array([
-    0.052961, 
-    -1.747018, 
-    3.352134, 
-    -0.019135
-    ], dtype=np.float64)
-
-def o3d_to_ros(pcd, frame_id="camera_link"):
-    points = np.asarray(pcd.points)
-
-    # If colors exist in Open3D, pack them into float32 RGB
-    if pcd.has_colors():
-        print("Point cloud has colors")
-        colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
-        rgb = [struct.unpack('I', struct.pack('BBBB', c[2], c[1], c[0], 255))[0] for c in colors]
-        data = [(p[0], p[1], p[2], rgb_val) for p, rgb_val in zip(points, rgb)]
-
-        fields = [
-            PointField('x', 0, PointField.FLOAT32, 1),
-            PointField('y', 4, PointField.FLOAT32, 1),
-            PointField('z', 8, PointField.FLOAT32, 1),
-            PointField('rgb', 16, PointField.UINT32, 1),
-        ]
-    else:
-        data = [(p[0], p[1], p[2]) for p in points]
-        fields = [
-            PointField('x', 0, PointField.FLOAT32, 1),
-            PointField('y', 4, PointField.FLOAT32, 1),
-            PointField('z', 8, PointField.FLOAT32, 1),
-        ]
-
-    header = Header()
-    header.stamp = rospy.Time.now()
-    header.frame_id = frame_id
-
-    return pc2.create_cloud(header, fields, data)
+# LIMO ROS AGILEX SIMULATION
+camera_intrinsics = np.array([
+                [381.36246688113556,   0.0, 320.5],
+                [  0.0,               381.36246688113556, 240.5],
+                [  0.0,                 0.0,   1.0]
+            ])
+camera_extrinsics = np.array([[0, 0, 1, 0.000],
+                    [-1, 0, 0, 0.000],
+                    [0, -1, 0, 0.03],
+                    [0, 0, 0, 1]])
 
 
 
+############################################################
 
-def project_points(
-    xy: np.ndarray,
-    camera_height: float,
-    camera_x_offset: float,
-    camera_matrix: np.ndarray,
-    dist_coeffs: np.ndarray,
-    isFisheye: bool,
-):
-    """
-    Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
-    Args:
-        xy: array of shape (batch_size, horizon, 2) representing (x, y) coordinates
-    """
-    batch_size, horizon, _ = xy.shape
 
-    # create 3D coordinates with the camera positioned at the given height
-    xyz = np.concatenate(
-        [xy, camera_height * np.ones(list(xy.shape[:-1]) + [1])], axis=-1
-    )
+###################### VIZ ####################################
 
-    # create dummy rotation and translation vectors
-    rvec = tvec = np.zeros((3, 1), dtype=np.float64)
 
-    xyz[..., 0] += camera_x_offset
+# def project_points(
+#     xy: np.ndarray,
+#     camera_height: float,
+#     camera_x_offset: float,
+#     camera_matrix: np.ndarray,
+#     dist_coeffs: np.ndarray,
+#     isFisheye: bool,
+# ):
+#     """
+#     Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
+#     Args:
+#         xy: array of shape (batch_size, horizon, 2) representing (x, y) coordinates
+#     """
+#     batch_size, horizon, _ = xy.shape
 
-    # Convert from (x, y, z) to (y, -z, x) for cv2
-    xyz_cv = np.stack([xyz[..., 1], -xyz[..., 2], xyz[..., 0]], axis=-1)
+#     # create 3D coordinates with the camera positioned at the given height
+#     xyz = np.concatenate(
+#         [xy, camera_height * np.ones(list(xy.shape[:-1]) + [1])], axis=-1
+#     )
+
+#     # create dummy rotation and translation vectors
+#     rvec = tvec = np.zeros((3, 1), dtype=np.float64)
+
+#     xyz[..., 0] += camera_x_offset
+
+#     # Convert from (x, y, z) to (y, -z, x) for cv2
+#     xyz_cv = np.stack([xyz[..., 1], -xyz[..., 2], xyz[..., 0]], axis=-1)
     
-    if isFisheye:
-        assert dist_coeffs is not None, "dist_coeffs must be provided for fisheye projection"
+#     if isFisheye:
+#         assert dist_coeffs is not None, "dist_coeffs must be provided for fisheye projection"
 
-        # done for cv2.fisheye.projectPoint requires float32/float64 and shape (N,1,3),
-        xyz_cv = xyz_cv.reshape(batch_size * horizon, 1, 3).astype(np.float64)
+#         # done for cv2.fisheye.projectPoint requires float32/float64 and shape (N,1,3),
+#         xyz_cv = xyz_cv.reshape(batch_size * horizon, 1, 3).astype(np.float64)
 
-        # uv, _ = cv2.projectPoints(
-        #     xyz_cv.reshape(batch_size * horizon, 3), rvec, tvec, camera_matrix, dist_coeffs
-        # )
-        uv, _ = cv2.fisheye.projectPoints(
-            xyz_cv, rvec, tvec, camera_matrix, dist_coeffs
-        )
+#         # uv, _ = cv2.projectPoints(
+#         #     xyz_cv.reshape(batch_size * horizon, 3), rvec, tvec, camera_matrix, dist_coeffs
+#         # )
+#         uv, _ = cv2.fisheye.projectPoints(
+#             xyz_cv, rvec, tvec, camera_matrix, dist_coeffs
+#         )
 
 
-    else: # pinhole
+#     else: # pinhole
 
-        # xyz_cv shape: (batch_size * horizon, 3)
-        xyz_cv = xyz_cv.reshape(batch_size * horizon, 3).astype(np.float64)
+#         # xyz_cv shape: (batch_size * horizon, 3)
+#         xyz_cv = xyz_cv.reshape(batch_size * horizon, 3).astype(np.float64)
 
-        uv, _ = cv2.projectPoints(
-            xyz_cv,       # (N, 3)
-            rvec,         # rotation vector (Rodrigues)
-            tvec,         # translation vector
-            camera_matrix,
-            dist_coeffs   # None
-        )
+#         uv, _ = cv2.projectPoints(
+#             xyz_cv,       # (N, 3)
+#             rvec,         # rotation vector (Rodrigues)
+#             tvec,         # translation vector
+#             camera_matrix,
+#             dist_coeffs   # None
+#         )
     
-    uv = uv.reshape(batch_size, horizon, 2)
+#     uv = uv.reshape(batch_size, horizon, 2)
     
-    return uv
+#     return uv
 
+# def get_pos_pixels(
+#     points: np.ndarray,
+#     camera_height: float,
+#     camera_x_offset: float,
+#     camera_matrix: np.ndarray,
+#     dist_coeffs: np.ndarray,
+#     isFisheye: bool,
+#     clip: bool = False,
+# ):
+#     """
+#     Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
+#     """
+#     pixels = project_points(
+#         points[np.newaxis], camera_height, camera_x_offset, camera_matrix, dist_coeffs, isFisheye
+#     )[0]
+#     # print(pixels)
+#     # Flip image horizontally
+#     pixels[:, 0] = VIZ_IMAGE_SIZE[0] - pixels[:, 0]
 
-# TODO CLIP IS NOT USED GET RID OF IT
-def get_pos_pixels(
-    points: np.ndarray,
-    camera_height: float,
-    camera_x_offset: float,
-    camera_matrix: np.ndarray,
-    dist_coeffs: np.ndarray,
-    isFisheye: bool,
-    clip: bool = False,
-):
-    """
-    Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
-    """
-    pixels = project_points(
-        points[np.newaxis], camera_height, camera_x_offset, camera_matrix, dist_coeffs, isFisheye
-    )[0]
-    # print(pixels)
-    # Flip image horizontally
-    pixels[:, 0] = VIZ_IMAGE_SIZE[0] - pixels[:, 0]
+#     return pixels
 
-    return pixels
+# def plot_trajs_and_points_on_image( img: np.ndarray, isFisheye: bool, camera_matrix: np.ndarray, dist_coeffs: np.ndarray,list_trajs: list):
+#     """
+#     Plot trajectories and points on an image.
+#     """
 
-
-def plot_trajs_and_points_on_image( img: np.ndarray, isFisheye: bool, camera_matrix: np.ndarray, dist_coeffs: np.ndarray,list_trajs: list):
-    """
-    Plot trajectories and points on an image.
-    """
-
-    for i, traj in enumerate(list_trajs):
-        xy_coords = traj[:, :2]
-        traj_pixels = get_pos_pixels(
-            xy_coords, camera_height, camera_x_offset, camera_matrix, dist_coeffs, isFisheye, clip=False
-        )
+#     for i, traj in enumerate(list_trajs):
+#         xy_coords = traj[:, :2]
+#         traj_pixels = get_pos_pixels(
+#             xy_coords, camera_height, camera_x_offset, camera_matrix, dist_coeffs, isFisheye, clip=False
+#         )
         
-        points = traj_pixels.astype(int).reshape(-1, 1, 2)
-        color = tuple(int(x) for x in np.random.choice(range(50, 255), size=3))
+#         points = traj_pixels.astype(int).reshape(-1, 1, 2)
+#         color = tuple(int(x) for x in np.random.choice(range(50, 255), size=3))
 
-        # inverting x,y axis so origin in image is down-left corner
-        points[:, :, 1] = VIZ_IMAGE_SIZE[1] - 1 - points[:, :, 1]
+#         # inverting x,y axis so origin in image is down-left corner
+#         points[:, :, 1] = VIZ_IMAGE_SIZE[1] - 1 - points[:, :, 1]
 
-        # Draw trajectory
-        cv2.polylines(img, [points], isClosed=False, color=color, thickness=3)
+#         # Draw trajectory
+#         cv2.polylines(img, [points], isClosed=False, color=color, thickness=3)
 
-        # Draw start point (green) and goal point (red)
-        # start = tuple(points[0, 0])
-        # goal = tuple(points[-1, 0])
-        # cv2.circle(img, start, 6, (0, 255, 0), -1)
-        # cv2.circle(img, goal, 6, (0, 0, 255), -1)
+#         # Draw start point (green) and goal point (red)
+#         # start = tuple(points[0, 0])
+#         # goal = tuple(points[-1, 0])
+#         # cv2.circle(img, start, 6, (0, 255, 0), -1)
+#         # cv2.circle(img, goal, 6, (0, 0, 255), -1)
 
-    return img
+#     return img
+
+
+
+
+
+#################################################################
 
 
 
@@ -308,71 +235,6 @@ def action_plot(uc_actions, gc_actions, goal_pos):
     plt.savefig(save_path)
     plt.close(fig)
     print(f"output image saved as {save_path}")
-
-def make_path_marker(points, marker_id, r, g, b, frame_id="base_link"):
-    marker = Marker()
-    marker.header.frame_id = frame_id
-    marker.header.stamp = rospy.Time.now()
-    marker.ns = "multi_paths"
-    marker.id = marker_id
-    marker.type = Marker.LINE_STRIP
-    marker.action = Marker.ADD
-
-    marker.scale.x = 0.05  # line width
-    marker.color.a = 1.0
-    marker.color.r = r
-    marker.color.g = g
-    marker.color.b = b
-
-    # print("---------------")
-    for (x, y) in points:
-        p = Point()
-        # print(f"x {x} y {y}")
-        p.x, p.y, p.z = x, y, 0.0
-        marker.points.append(p)
-    # print("---------------")
-    return marker
-
-# TODO put in utils
-def visualize_cost_map(cost_map, viz_points, ground_array):
-
-    costmapPCD = CostMapPCD(CostMapConfig(), cost_map, viz_points, ground_array)
-    costmapPCD.SaveTSDFMap()
-
-def viz_chosen_wp(chosen_waypoint, waypoint_viz_pub):
-    marker = Marker()
-    marker.header.frame_id = "base_link"   # or "odom", "base_link" depending on your TF
-    marker.header.stamp = rospy.Time.now()
-
-    marker.ns = "points"
-    marker.id = 0
-    marker.type = Marker.SPHERE
-    marker.action = Marker.ADD
-
-    # Example 2D point (x, y, z=0)
-    marker.pose.position.x = chosen_waypoint[0]
-    marker.pose.position.y = chosen_waypoint[1]
-    marker.pose.position.z = 0.0
-
-    marker.pose.orientation.x = 0.0
-    marker.pose.orientation.y = 0.0
-    marker.pose.orientation.z = 0.0
-    marker.pose.orientation.w = 1.0
-
-    # Sphere size
-    marker.scale.x = 0.1
-    marker.scale.y = 0.1
-    marker.scale.z = 0.1
-
-    # Color (red)
-    marker.color.a = 1.0  # alpha
-    marker.color.r = 1.0
-    marker.color.g = 0.0
-    marker.color.b = 0.0
-
-    waypoint_viz_pub.publish(marker)
-
-
 
 def Marker_process(points, id, selected_num, length=8):
     marker = Marker()
@@ -444,8 +306,6 @@ def pos_callback(msg):
     robo_orientation = np.array([msg.pose.orientation.x, msg.pose.orientation.y, 
                         msg.pose.orientation.z, msg.pose.orientation.w])
 
-
-
 def main(args: argparse.Namespace):
     global context_size, robo_pos, robo_orientation, rela_pos
 
@@ -477,10 +337,6 @@ def main(args: argparse.Namespace):
     model = model.to(device)
     model.eval()
 
-    # ROS node must be initialized before creating PathGuide (for TF2 time)
-    rospy.init_node("EXPLORATION", anonymous=False)
-    rate = rospy.Rate(RATE)
-
     pathguide = PathGuide(device, ACTION_STATS)
     pathopt = PathOpt()
      # load topomap
@@ -502,7 +358,8 @@ def main(args: argparse.Namespace):
         goal_node = args.goal_node
 
      # ROS
-
+    rospy.init_node("EXPLORATION", anonymous=False)
+    rate = rospy.Rate(RATE)
     image_curr_msg = rospy.Subscriber(
         IMAGE_TOPIC, Image, callback_obs, queue_size=1)
 
@@ -518,17 +375,6 @@ def main(args: argparse.Namespace):
     sampled_actions_pub = rospy.Publisher(SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1)
     goal_pub = rospy.Publisher("/topoplan/reached_goal", Bool, queue_size=1)
     marker_pub = rospy.Publisher(VISUAL_MARKER_TOPIC, Marker, queue_size=10)
-    goal_img_pub = rospy.Publisher("/topoplan/goal_img", Image, queue_size=1)
-    subgoal_img_pub = rospy.Publisher("/topoplan/subgoal_img", Image, queue_size=1)
-    closest_node_img_pub = rospy.Publisher("/topoplan/closest_node_img", Image, queue_size=1)
-    chosen_wp_viz_pub = rospy.Publisher('visualization_marker', Marker, queue_size=10)
-    all_path_pub = rospy.Publisher("visualization_marker_array", MarkerArray, queue_size=10)
-    cam_wp_viz_pub = rospy.Publisher("/topoplan/wps_overlay_img", Image, queue_size=10)
-    point_cloud_pub = rospy.Publisher("/vint_navid/point_cloud", PointCloud2, latch=True, queue_size=1)
-    depth_pub = rospy.Publisher("/topoplan/depth_img", Image, queue_size=10)
-    pseudo_costmap_pub = rospy.Publisher("/topoplan/pseudo_costmap", Image, queue_size=10)
-
-
 
     print("Registered with master node. Waiting for image observations...")
 
@@ -549,43 +395,8 @@ def main(args: argparse.Namespace):
         if len(context_queue) > model_params["context_size"]:
             if model_params["model_type"] == "nomad":
                 obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False)
-                print(f"context queue contains {len(context_queue)} images")
                 if args.guide:
-                    if getattr(args, "use_ros_cloud", True):
-                        pathguide.get_cost_map_from_ros_topic(topic="/depth_anything/depth_registered/points", target_frame="base_link", timeout=0.5)
-                    else:
-                        pathguide.get_cost_map_via_tsdf(context_queue[-1])
-                    # Publish pseudo-depth TSDF costmap as mono8 image
-                    try:
-                        cm = pathguide.get_cost_map(extra_info=False)
-                        if cm is not None:
-                            cm_np = cm.detach().cpu().numpy()
-                            cm_norm = cv2.normalize(cm_np, None, 0, 255, cv2.NORM_MINMAX)
-                            cm_uint8 = cm_norm.astype(np.uint8)
-                            cm_msg = bridge.cv2_to_imgmsg(cm_uint8, encoding="mono8")
-                            cm_msg.header.stamp = rospy.Time.now()
-                            cm_msg.header.frame_id = "base_link"
-                            pseudo_costmap_pub.publish(cm_msg)
-                    except Exception as e:
-                        rospy.logwarn(f"Failed to publish pseudo costmap: {e}")
-
-                if args.visualize:
-                    cost_map, viz_points, ground_array = pathguide.get_cost_map()
-                    visualize_cost_map(cost_map, viz_points, ground_array)
-
-                # TODO have another condition above is also storing which takes time  
-                # TODO THE SIZING IS OFF  
-                # pseudo_pcd = pathguide.get_pseudo_pcd()
-                # point_cloud_msg = o3d_to_ros(pseudo_pcd, frame_id="oak-d-base-frame") # TODO MAKE IT IN TOPICS
-                # rospy.Timer(rospy.Duration(0.2), lambda event: point_cloud_pub.publish(point_cloud_msg))
-
-                # Publish depth image
-                if args.guide and args.visualize:
-                    depth_img = bridge.cv2_to_imgmsg(pathguide.get_depth_img())
-                    depth_img.header.stamp = rospy.Time.now()
-                    # depth_img.encoding = "32FC1"
-                    depth_pub.publish(depth_img)
-
+                    pathguide.get_cost_map_via_tsdf(context_queue[-1])
                 obs_images = torch.split(obs_images, 3, dim=1)
                 obs_images = torch.cat(obs_images, dim=1) 
                 obs_images = obs_images.to(device)
@@ -596,7 +407,7 @@ def main(args: argparse.Namespace):
                     goal_pos = np.array([float(lines[end].split()[0]), float(lines[end].split()[1]), float(lines[end].split()[2])])
                     rela_pos = goal_pos - robo_pos
                     rela_pos = rotate_point_by_quaternion(rela_pos, robo_orientation)[:2]
-                    # print('rela_pos: ', rela_pos)
+                    print('rela_pos: ', rela_pos)
                     marker_robogoal = Marker()
                     Marker_process_goal(rela_pos[:2], marker_robogoal, 1)
                     robogoal_pub.publish(marker_robogoal)
@@ -604,40 +415,6 @@ def main(args: argparse.Namespace):
                     mask = torch.zeros(1).long().to(device)  
                 goal_image = [transform_images(g_img, model_params["image_size"], center_crop=False).to(device) for g_img in topomap[start:end + 1]]
                 goal_image = torch.concat(goal_image, dim=0)
-
-
-                # Crop for all cases
-                crop=True
-                # Publisher goal image
-            
-                goal_img = transform_images(topomap[goal_node], model_params["image_size"], center_crop=crop)
-                goal_img_msg = pil_to_msg(goal_img)
-                goal_img_msg.header.stamp = rospy.Time.now()
-                goal_img_msg.header.frame_id = "base_footprint"
-                goal_img_msg.encoding = "rgb8"
-                goal_img_pub.publish(goal_img_msg)
-
-
-                # Publisher subgoal image
-
-                subgoal_img = transform_images(topomap[end], model_params["image_size"], center_crop=crop)
-                subgoal_img_msg = pil_to_msg(subgoal_img)
-                subgoal_img_msg.header.stamp = rospy.Time.now()
-                subgoal_img_msg.header.frame_id = "base_footprint"
-                subgoal_img_msg.encoding = "rgb8"
-                subgoal_img_pub.publish(subgoal_img_msg)
-
-
-                # Publisher closest node image
-
-                closest_node_img = transform_images(topomap[closest_node], model_params["image_size"], center_crop=crop)
-                closest_node_img_msg = pil_to_msg(closest_node_img)
-                closest_node_img_msg.header.stamp = rospy.Time.now()
-                closest_node_img_msg.header.frame_id = "base_footprint"
-                closest_node_img_msg.encoding = "rgb8"
-                closest_node_img_pub.publish(closest_node_img_msg)
-
-
                 obsgoal_cond = model('vision_encoder', obs_img=obs_images.repeat(len(goal_image), 1, 1, 1), goal_img=goal_image, input_goal_mask=mask.repeat(len(goal_image)))
                 if args.pos_goal:
                     goal_poses = np.array([[float(lines[i].split()[0]), float(lines[i].split()[1]), float(lines[i].split()[2])] for i in range(start, end + 1)])
@@ -670,7 +447,6 @@ def main(args: argparse.Namespace):
                     noise_scheduler.set_timesteps(num_diffusion_iters)
                 
                 start_time = time.time()
-                start_time_guide = None
                 for k in noise_scheduler.timesteps[:]:
                     with torch.no_grad():
                         # predict noise
@@ -686,28 +462,22 @@ def main(args: argparse.Namespace):
                             timestep=k,
                             sample=naction
                         ).prev_sample
-                    
                     if args.guide:
-                        start_time_guide = time.time() if start_time_guide is None else start_time_guide
                         interval1 = 6
                         period = 1
                         if k <= interval1:
                             if k % period == 0:
                                     if k > 2:
-                                        grad, cost_list = pathguide.get_gradient(naction, goal_pos=None, scale_factor=scale_factor)
+                                        grad, cost_list = pathguide.get_gradient(naction, goal_pos=rela_pos, scale_factor=scale_factor)
                                         grad_scale = 1.0
                                         naction -= grad_scale * grad
                                     else:
                                         if k>=0 and k <= 2:
                                             naction_tmp = naction.detach().clone()
                                             for i in range(1):
-                                                grad, cost_list = pathguide.get_gradient(naction_tmp, goal_pos=None, scale_factor=scale_factor)
+                                                grad, cost_list = pathguide.get_gradient(naction_tmp, goal_pos=rela_pos, scale_factor=scale_factor)
                                                 naction_tmp -= grad
                                             naction = naction_tmp
-
-                print("time elapsed Nomad pred:", time.time() - start_time)
-                if args.guide:
-                    print("time elapsed diffusion k guidance:", time.time() - start_time_guide)
 
                 naction = to_numpy(get_action(naction))
                 naction_selected, selected_num = pathopt.select_trajectory(naction, l=args.waypoint, angle_threshold=45)
@@ -716,49 +486,10 @@ def main(args: argparse.Namespace):
                 for i in range(8):
                     marker = Marker_process(sampled_actions_msg.data[i * 16 + 1 : (i + 1) * 16 + 1] * scale_factor, i, selected_num)
                     marker_pub.publish(marker)
-                # print("published sampled actions")
+                print("published sampled actions")
                 sampled_actions_pub.publish(sampled_actions_msg)
 
                 chosen_waypoint = naction_selected[args.waypoint]
-                viz_chosen_wp(chosen_waypoint, chosen_wp_viz_pub)
-                print(f"WAYPOINT WE VIZ VALUE {chosen_waypoint}")
-
-
-                # Publisher all paths 
-
-                ma = MarkerArray()
-                for idx, paths in enumerate(naction):
-                    r = 0.0
-                    g = 0.0
-                    b = 1.0
-                    marker = make_path_marker(
-                        paths, idx, r, g, b, frame_id="base_link")
-                    ma.markers.append(marker)
-                all_path_pub.publish(ma) 
-
-
-                # Publis trajectories overlayed on current camera image
-
-                img = context_queue[-1]
-                img = pil_to_numpy_array(image_input=img, target_size=VIZ_IMAGE_SIZE)
-                # print("Image shape:", img.shape, "dtype:", img.dtype, "min:", img.min(), "max:", img.max())
-                if img.dtype != np.uint8:
-                    img = (img * 255).astype(np.uint8)
-                # Convert RGB → BGR for OpenCV
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                img = plot_trajs_and_points_on_image(
-                    img=img,
-                    isFisheye=False,
-                    camera_matrix=camera_matrix,
-                    dist_coeffs=None,
-                    list_trajs=naction_selected[np.newaxis],
-                )
-
-                ros_img = bridge.cv2_to_imgmsg(img, encoding="bgr8")
-                ros_img.header.stamp = rospy.Time.now()
-                ros_img.header.frame_id = "base_footprint"
-                cam_wp_viz_pub.publish(ros_img)
-
             elif (len(context_queue) > model_params["context_size"]):
                 start = max(closest_node - args.radius, 0)
                 end = min(closest_node + args.radius + 1, goal_node)
@@ -880,20 +611,6 @@ if __name__ == "__main__":
         default=False,
         type=bool,
     )
-
-    parser.add_argument(
-        "--visualize",
-        default=False,
-        type=bool,
-    )
-
-    parser.add_argument(
-        "--use-ros-cloud",
-        default=True,
-        type=bool,
-        help="Use ROS topic instead of local depth anything",
-    )
-
     args = parser.parse_args()
     print(f"Using {device}")
     main(args)

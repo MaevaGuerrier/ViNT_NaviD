@@ -227,3 +227,72 @@ class TsdfCostMap:
 
 
 # EoF
+
+
+############### what do i need 
+
+# scipy.ndimage.gaussian_filter can be used to compute derivatives of the Gaussian, 
+# such as the gradient magnitude or Laplacian, by specifying an order parameter.
+
+
+
+
+
+# Understand what is the num_x num_y
+# ground_array = np.ones([self.num_x, self.num_y]) * 0.0 just do np.zeros 
+
+
+## GROUND 
+
+# max_x, max_y, _ = np.amax(self.obs_points, axis=0) + self._cfg_general.clear_dist
+# min_x, min_y, _ = np.amin(self.obs_points, axis=0) - self._cfg_general.clear_dist
+
+# self.num_x = np.ceil((max_x - min_x) / self._cfg_general.resolution / 10).astype(int) * 10
+# self.num_y = np.ceil((max_y - min_y) / self._cfg_general.resolution / 10).astype(int) * 10
+
+
+
+
+## TSDF ARRAY 
+
+# free_map = gaussian_filter(free_map, sigma=self._cfg_tsdf.sigma_expand)
+# free_map[free_map < self._cfg_tsdf.free_space_threshold] = 0
+# # assign obstacles
+# free_map[obs_map > self._cfg_tsdf.obstacle_threshold] = 1.0
+# tsdf_array = ndimage.distance_transform_edt(free_map)
+# tsdf_array[tsdf_array > 0.0] = np.log(tsdf_array[tsdf_array > 0.0] + math.e)
+# tsdf_array = gaussian_filter(tsdf_array, sigma=self._cfg_general.sigma_smooth)
+
+
+
+# data[0] -> [tsdf_array, viz_points, ground_array]
+#  -> self.cost_map = torch.tensor(data[0]).requires_grad_(False).to(self.device)
+
+
+# cost_grid = self.cost_map.T.expand(trajs_ori.shape[0], 1, -1, -1)
+
+
+# viz points 
+
+
+# self.obs_points = np.asarray(self.obs_pcd.points)
+# self.free_points = np.asarray(self.free_pcd.points)
+
+
+
+
+# free map values range b4 Gaussian filter:  0.0 1.0
+# free map shape:  (880, 500)
+# free map values range:  0.0 1.0
+# tsdf map values range:  0.014938984326016421 6.6064603080822994
+# tsdf map shape:  (880, 500)
+# obs points shape:  (1903, 3)
+# obs point value range:  -2.059154557569928 7.2788310050964355
+# free points shape:  (1473, 3)
+# free point value range:  -3.662443911086536 9.598074913024902
+# viz points shape:  (3376, 3)
+# ground array shape:  (880, 500)
+# ground array value range:  0.0 0.0
+# occupancy map generation time:  0.06496119499206543
+# cost map shape: torch.Size([880, 500]), norm_inds shape: torch.Size([24, 7, 2])
+# cost grid shape (costmap after expand): torch.Size([24, 1, 500, 880])

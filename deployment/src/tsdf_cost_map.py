@@ -142,6 +142,7 @@ class TsdfCostMap:
                 except:
                     import ipdb;ipdb.set_trace()
 
+        print("free map values range b4 Gaussian filter: ", np.min(free_map), np.max(free_map))
         free_map = gaussian_filter(free_map, sigma=self._cfg_tsdf.sigma_expand)
 
         free_map[free_map < self._cfg_tsdf.free_space_threshold] = 0
@@ -149,14 +150,27 @@ class TsdfCostMap:
         free_map[obs_map > self._cfg_tsdf.obstacle_threshold] = 1.0
         # print("occupancy map generation completed.")
         # Distance Transform
+        print("free map shape: ", free_map.shape)
+        print("free map values range: ", np.min(free_map), np.max(free_map))
         tsdf_array = ndimage.distance_transform_edt(free_map)
 
         tsdf_array[tsdf_array > 0.0] = np.log(tsdf_array[tsdf_array > 0.0] + math.e)
         tsdf_array = gaussian_filter(tsdf_array, sigma=self._cfg_general.sigma_smooth)
 
+        print("tsdf map values range: ", np.min(tsdf_array), np.max(tsdf_array))
+        print("tsdf map shape: ", tsdf_array.shape)
+        print("obs points shape: ", self.obs_points.shape)
+        print("obs point value range: ", np.min(self.obs_points), np.max(self.obs_points))
+        print("free points shape: ", self.free_points.shape)
+        print("free point value range: ", np.min(self.free_points), np.max(self.free_points))
+
         viz_points = np.concatenate((self.obs_points, self.free_points), axis=0)
+        print("viz points shape: ", viz_points.shape)
 
         ground_array = np.ones([self.num_x, self.num_y]) * 0.0
+        print("ground array shape: ", ground_array.shape)
+        print("ground array value range: ", np.min(ground_array), np.max(ground_array))
+    
         end_time = time.time()
         print("occupancy map generation time: ", end_time - start_time)
         return [tsdf_array, viz_points, ground_array], [
